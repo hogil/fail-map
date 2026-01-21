@@ -19,6 +19,8 @@
 |------|------|------|
 | `fail-map-claude.py` | **원본** 싱글 bucket 파이프라인 | 안정적, 검증된 코드 |
 | `fail-map-dual-bucket.py` | **Dual bucket 표준 버전** | 균형잡힌 성능, 프로덕션 권장 ⭐ |
+| `fail-map-bucketb-prefixlist.py` | Bucket B 매칭(0~10초) + positions JSON 기록 | **Prefix-list 방식(추천)** |
+| `fail-map-bucketb-head.py` | Bucket B 매칭(0~10초) + positions JSON 기록 | **HEAD 방식(list 없음)** |
 
 ### Optimized Versions
 
