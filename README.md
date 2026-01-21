@@ -152,9 +152,10 @@ python optimized-memory-efficient.py
 ```python
 @dataclass
 class BucketBConfig:
-    bucket_name: str = 'your-secondary-bucket'
+    bucket_name: str = 'eds.m-eds-map-raw'
     enabled: bool = True
     time_offset_range: tuple = (0, 10)  # 0~10초 범위
+    file_pattern: str = '.gz'  # Bucket B 파일 확장자
 ```
 
 ### 성능 튜닝
@@ -192,14 +193,27 @@ Dual bucket 모드에서는 각 chip에 `bucket_b` 필드가 추가됩니다:
 }
 ```
 
-## Time Offset Matching
+## Filename Matching
 
-Bucket B 파일이 0~10초 늦게 생성되는 경우를 자동으로 매칭합니다:
+### Bucket 정보
+- **Bucket A (Primary)**: `eds-ec-memory.fbm-data` (.Z 파일)
+- **Bucket B (Secondary)**: `eds.m-eds-map-raw` (.gz 파일)
+
+### 파일명 변환 규칙
+
+Bucket B 파일은 특별한 명명 규칙을 가집니다:
 
 ```
-Bucket A: token_00P_20260111_143025.Z
-          ↓ (자동 매칭)
-Bucket B: token_00P_20260111_143030.Z  (+5초)
+Bucket A: 01_ABC123-00P_N_20260121_025936.Z
+          ↓ (자동 변환 + 시간 매칭)
+Bucket B: ABC123_W01_20260121_025938.gz  (+2초)
+
+변환 규칙:
+1. 맨 앞 2글자 (01) → W01 (W 접두사 추가)
+2. LOT ID (ABC123) → 그대로 유지
+3. -00P_N → 제거
+4. 날짜/시간 → 유지 (0~10초 차이 허용)
+5. 확장자 .Z → .gz
 ```
 
 ## Requirements

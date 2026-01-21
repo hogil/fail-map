@@ -50,8 +50,8 @@ class PipelineConfig:
 
 @dataclass
 class BucketBConfig:
-    """Second bucket configuration"""
-    bucket_name: str = 'eds-ec-memory.fbm-data-secondary'  # 새로운 bucket
+    """Second bucket configuration - eds.m-eds-map-raw"""
+    bucket_name: str = 'eds.m-eds-map-raw'  # 실제 bucket 이름
     region_name: str = ''
     aws_access_key_id: str = 'ho.choi-LakeS3-F6B0U6'
     aws_secret_access_key: str = 'iYb7zYDVzitt4QVkUcR2'
@@ -60,6 +60,7 @@ class BucketBConfig:
     download_threads: int = 128
     enabled: bool = True  # Dual bucket 활성화 여부
     time_offset_range: tuple = (0, 10)  # 시간 오프셋 범위 (초)
+    file_pattern: str = '.gz'  # Bucket B 파일 확장자
 
 CFG = PipelineConfig()
 CFG_B = BucketBConfig()
@@ -121,17 +122,67 @@ def _cleanup_empty_p2_and_dates(base_root: str, p1_set: set) -> int:
 
 # =================== Fast Pattern Matching ===================
 
+def parse_bucket_a_filename(filename):
+    """
+    Bucket A 파일명 파싱
+    '01_ABC123-00P_N_20260121_025936.Z'
+    → {'wafer': '01', 'lot_id': 'ABC123', 'date': '20260121', 'time': '025936'}
+    """
+    basename = os.path.basename(filename)
+    # 패턴: WW_LOTID-00X_Y_YYYYMMDD_HHMMSS.Z
+    pattern = r'(\d{2})_([A-Z0-9]+)-00[A-Z]_[A-Z]_(\d{8})_(\d{6})\.Z'
+    m = re.search(pattern, basename, re.IGNORECASE)
+    if m:
+        return {
+            'wafer': m.group(1),      # 01
+            'lot_id': m.group(2),     # ABC123
+            'date': m.group(3),        # 20260121
+            'time': m.group(4)         # 025936
+        }
+    return None
+
+def generate_bucket_b_patterns(info, offset_range=(0, 10)):
+    """
+    Bucket A 정보 → Bucket B 파일명 패턴 생성
+    {'wafer': '01', 'lot_id': 'ABC123', 'date': '20260121', 'time': '025936'}
+    → ['ABC123_W01_20260121_025936.gz', 'ABC123_W01_20260121_025937.gz', ...]
+    """
+    lot_id = info['lot_id']
+    wafer = f"W{info['wafer']}"  # 01 → W01
+    date = info['date']
+    base_time = info['time']
+
+    patterns = []
+    try:
+        dt = datetime.strptime(base_time, "%H%M%S")
+        for offset in range(offset_range[0], offset_range[1] + 1):
+            new_dt = dt + timedelta(seconds=offset)
+            time_str = new_dt.strftime("%H%M%S")
+            patterns.append(f"{lot_id}_{wafer}_{date}_{time_str}.gz")
+    except:
+        patterns.append(f"{lot_id}_{wafer}_{date}_{base_time}.gz")
+
+    return patterns
+
 def extract_filename_info(key):
     """
-    파일명에서 매칭 정보 추출 (초고속)
-    '20260111/XX_token_00P_20260111_143025.Z'
-    → ('token', '20260111', '143025')
+    범용 파일명 정보 추출 (Bucket A 또는 B)
+    Bucket A: '01_ABC123-00P_N_20260121_025936.Z' → ('ABC123', '20260121', '025936')
+    Bucket B: 'ABC123_W01_20260121_025938.gz' → ('ABC123', '20260121', '025938')
     """
     basename = os.path.basename(key)
-    # 패턴: token, YYYYMMDD, HHMMSS 추출
-    m = re.search(r'(\w+).*?(\d{8})[_-](\d{6})', basename)
+
+    # Bucket A 패턴 시도
+    info_a = parse_bucket_a_filename(key)
+    if info_a:
+        return (info_a['lot_id'], info_a['date'], info_a['time'])
+
+    # Bucket B 패턴 시도
+    pattern_b = r'([A-Z0-9]+)_W\d{2}_(\d{8})_(\d{6})\.gz'
+    m = re.search(pattern_b, basename, re.IGNORECASE)
     if m:
-        return (m.group(1), m.group(2), m.group(3))
+        return (m.group(1), m.group(2), m.group(3))  # (LOT_ID, date, time)
+
     return None
 
 def generate_time_variants(time_hhmmss, offset_range=(0, 10)):
@@ -150,42 +201,40 @@ def generate_time_variants(time_hhmmss, offset_range=(0, 10)):
         return {time_hhmmss}
 
 class FastBucketBIndex:
-    """초고속 Bucket B 인덱스"""
+    """초고속 Bucket B 인덱스 (새로운 파일명 규칙)"""
 
     def __init__(self):
-        # {(token, date, time): [keys]}
-        self.time_index = defaultdict(list)
-        # {date: set(times)}
-        self.date_times = defaultdict(set)
+        # {basename: full_key} - 빠른 검색을 위한 basename 인덱스
+        self.basename_to_key = {}
 
     def build_from_keys(self, keys):
         """키 리스트로부터 인덱스 구축"""
         t0 = time.time()
         for key in keys:
-            info = extract_filename_info(key)
-            if info:
-                token, date, time_str = info
-                self.time_index[(token, date, time_str)].append(key)
-                self.date_times[date].add(time_str)
-        print(f"  [FastIndex] Built in {time.time()-t0:.2f}s, {len(self.time_index)} entries")
+            basename = os.path.basename(key)
+            self.basename_to_key[basename] = key
+        print(f"  [FastIndex] Built in {time.time()-t0:.2f}s, {len(self.basename_to_key)} entries")
 
     def find_matches(self, bucket_a_keys, offset_range=(0, 10)):
-        """Bucket A keys에 대응되는 Bucket B keys 찾기 (초고속)"""
+        """
+        Bucket A keys에 대응되는 Bucket B keys 찾기 (초고속)
+        01_ABC123-00P_N_20260121_025936.Z → ABC123_W01_20260121_025936~025946.gz
+        """
         t0 = time.time()
         matched = set()
 
         for key_a in bucket_a_keys:
-            info = extract_filename_info(key_a)
+            info = parse_bucket_a_filename(key_a)
             if not info:
                 continue
 
-            token, date, time_a = info
-            time_variants = generate_time_variants(time_a, offset_range)
+            # Bucket B 패턴 생성
+            b_patterns = generate_bucket_b_patterns(info, offset_range)
 
-            for time_b in time_variants:
-                lookup_key = (token, date, time_b)
-                if lookup_key in self.time_index:
-                    matched.update(self.time_index[lookup_key])
+            # 각 패턴을 basename 인덱스에서 검색
+            for pattern in b_patterns:
+                if pattern in self.basename_to_key:
+                    matched.add(self.basename_to_key[pattern])
 
         print(f"  [FastIndex] Matched {len(matched)} keys in {time.time()-t0:.2f}s")
         return list(matched)
@@ -197,31 +246,28 @@ def join_contents_by_filename(contents_a, contents_b, offset_range=(0, 10)):
     """
     t0 = time.time()
 
-    # Bucket B 인덱싱
+    # Bucket B 인덱싱: basename → content
     b_index = {}
     for name_b, text_b in contents_b:
-        info = extract_filename_info(name_b)
-        if info:
-            token, date, time_b = info
-            b_index[(token, date, time_b)] = (name_b, text_b)
+        basename_b = os.path.basename(name_b)
+        b_index[basename_b] = (name_b, text_b)
 
     # Bucket A 기준으로 매칭
     joined = {}
     matched_count = 0
 
     for name_a, text_a in contents_a:
-        info_a = extract_filename_info(name_a)
+        info_a = parse_bucket_a_filename(name_a)
         if not info_a:
             continue
 
-        token, date, time_a = info_a
-        time_variants = generate_time_variants(time_a, offset_range)
+        # Bucket B 패턴 생성
+        b_patterns = generate_bucket_b_patterns(info_a, offset_range)
 
         # 첫 매칭 사용
-        for time_b in time_variants:
-            key = (token, date, time_b)
-            if key in b_index:
-                joined[name_a] = ((name_a, text_a), b_index[key])
+        for pattern in b_patterns:
+            if pattern in b_index:
+                joined[name_a] = ((name_a, text_a), b_index[pattern])
                 matched_count += 1
                 break
 
@@ -1134,17 +1180,18 @@ def run_dual_bucket_pipeline(df: pd.DataFrame):
     t0 = time.time()
     results = {}
 
-    # Bucket B 인덱스 구축 (1회)
+    # Bucket B 인덱스 구축 (1회) - .gz 파일 찾기
     bucket_b_index = None
     if s3_b:
         print("\n🔍 Building Bucket B index...")
         folders_b = s3_b.get_top_level_folders()
         selected_b = select_folders_by_window(folders_b, start_ts, end_ts)
-        all_keys_b, _ = s3_b.prefilter_keys_by_filename(
-            selected_b, token2pps, CFG.folder_filter_middle, start_ts, end_ts
-        )
+        # Bucket B는 .gz 파일 사용
+        all_meta_b = s3_b.get_compressed_files_meta(selected_b, CFG_B.file_pattern)
+        all_keys_b = [k for k, _ in all_meta_b]
+        print(f"  [Bucket B] Found {len(all_keys_b)} {CFG_B.file_pattern} files")
         bucket_b_index = FastBucketBIndex()
-        bucket_b_index.build_from_keys(list(all_keys_b.keys()))
+        bucket_b_index.build_from_keys(all_keys_b)
 
     try:
         folders = s3_a.get_top_level_folders()
