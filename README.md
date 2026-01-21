@@ -19,8 +19,9 @@
 |------|------|------|
 | `fail-map-claude.py` | **원본** 싱글 bucket 파이프라인 | 안정적, 검증된 코드 |
 | `fail-map-dual-bucket.py` | **Dual bucket 표준 버전** | 균형잡힌 성능, 프로덕션 권장 ⭐ |
-| `fail-map-bucketb-prefixlist.py` | Bucket B 매칭(0~10초) + positions JSON 기록 | **Prefix-list 방식(추천)** |
-| `fail-map-bucketb-head.py` | Bucket B 매칭(0~10초) + positions JSON 기록 | **HEAD 방식(list 없음)** |
+| `fail-map-bucketb-prefixlist.py` | Bucket B 매칭(-10~+10초) + positions JSON 기록 | **Prefix-list 방식(추천)** |
+| `fail-map-bucketb-head.py` | Bucket B 매칭(-10~+10초) + positions JSON 기록 | **HEAD 방식(list 없음)** |
+| `fail-map-bucketb-nearest.py` | Bucket B 매칭(-10~+10초) + positions JSON 기록 | **같은 폴더에서 시간 가장 가까운 파일 매칭** |
 
 ### Optimized Versions
 
@@ -32,7 +33,7 @@
 ┌─────────────────┐       ┌─────────────────┐
 │   Bucket A      │       │   Bucket B      │
 │  (Primary)      │       │  (Secondary)    │
-│                 │       │  +0~10초 늦음   │
+│                 │       │  -10~+10초      │
 └────────┬────────┘       └────────┬────────┘
          │                         │
          │    병렬 다운로드         │
@@ -101,7 +102,7 @@ bucket_b_index.build_from_keys(all_keys_b)  # ~20초
 # 파일명에서 시간 정보 추출
 '20260111/token_00P_20260111_143025.Z' → ('token', '20260111', '143025')
 
-# +0~10초 범위 생성
+# -10~+10초 범위 생성
 '143025' → ['143025', '143026', ..., '143035']
 
 # 메모리 인덱스에서 검색 (< 0.1초)

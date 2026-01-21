@@ -210,32 +210,61 @@ class S3ManagerB:
         except:
             return ""
 
-def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: BucketBConfig):
+def build_bucket_b_match_map_nearest(part_keys_a, s3b: S3ManagerB, cfg_b: BucketBConfig):
     """
+    동일 폴더(YYYYMMDD/) 내에서 lot_id + wafer 로 prefix 검색 후,
+    -10~+10초 범위 내에서 A와 가장 가까운 시간(B)을 매칭한다.
     returns: dict[a_key] -> match_meta
     """
     t0 = time.time()
+    lo, hi = int(cfg_b.time_offset_range[0]), int(cfg_b.time_offset_range[1])
+    if hi < lo:
+        lo, hi = hi, lo
+
     infos = {}
     for ka in part_keys_a:
         info = parse_bucket_a_key(ka)
         if info:
             infos[ka] = info
 
-    # 1) prefix 수집
+    # 1) prefix 수집 (folder/LOT_W01_)
     prefixes = set()
     for info in infos.values():
         for pfx in generate_bucket_b_prefixes(info, cfg_b.time_offset_range):
             prefixes.add(pfx)
 
     # 2) prefix 별 list
-    all_b_keys = set()
-    if prefixes:
+    prefix_list = sorted(prefixes)
+    prefix_to_keys = {p: [] for p in prefix_list}
+    all_listed = 0
+    if prefix_list:
         with ThreadPoolExecutor(max_workers=cfg_b.list_max_workers) as ex:
-            for keys in ex.map(s3b.list_keys_with_prefix, sorted(prefixes)):
-                for k in keys:
-                    all_b_keys.add(k)
+            for p, keys in zip(prefix_list, ex.map(s3b.list_keys_with_prefix, prefix_list)):
+                prefix_to_keys[p] = keys or []
+                all_listed += len(prefix_to_keys[p])
 
-    # 3) A -> B 매칭
+    # 3) prefix -> (key, dt_b) 캐시
+    prefix_to_parsed = {}
+    for p, keys in prefix_to_keys.items():
+        arr = []
+        for kb in keys:
+            bn = os.path.basename(str(kb))
+            if not bn.lower().endswith(cfg_b.file_ext):
+                continue
+            base = bn[: -len(cfg_b.file_ext)]
+            parts = base.split("_")
+            if len(parts) < 4:
+                continue
+            date = parts[-2]
+            hhmmss = parts[-1]
+            try:
+                dt_b = datetime.strptime(f"{date}_{hhmmss}", "%Y%m%d_%H%M%S")
+            except:
+                continue
+            arr.append((kb, dt_b))
+        prefix_to_parsed[p] = arr
+
+    # 4) A -> B 매칭 (closest time within [-10,+10])
     match_map = {}
     matched = 0
     for ka in part_keys_a:
@@ -244,28 +273,41 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
             match_map[ka] = {
                 "matched": False,
                 "bucket": cfg_b.bucket_name,
-                "method": "prefix_list",
+                "method": "nearest",
                 "reason": "parse_failed",
-                "time_offset_range": list(cfg_b.time_offset_range),
+                "time_offset_range": [lo, hi],
             }
             continue
-        hit_key = None
-        hit_off = None
-        for kb, off in generate_bucket_b_candidate_keys(info, cfg_b.time_offset_range):
-            if kb in all_b_keys:
-                hit_key = kb
-                hit_off = int(off)
-                break
-        if hit_key:
+
+        dt_a = datetime.strptime(f"{info['date']}_{info['time']}", "%Y%m%d_%H%M%S")
+        # 이 A에서 사용할 prefix는 1개 (generate_bucket_b_prefixes가 lot+wafer prefix 1개를 yield)
+        prefixes_a = list(generate_bucket_b_prefixes(info, cfg_b.time_offset_range))
+
+        best = None
+        best_key = None
+        best_diff = None
+        for pfx in prefixes_a:
+            for kb, dt_b in prefix_to_parsed.get(pfx, []):
+                diff = int(round((dt_b - dt_a).total_seconds()))
+                if diff < lo or diff > hi:
+                    continue
+                # tie-break: abs(diff) 작은 것 우선, abs 같으면 +쪽(미래) 우선
+                score = (abs(diff), 0 if diff >= 0 else 1)
+                if best is None or score < best:
+                    best = score
+                    best_key = kb
+                    best_diff = diff
+
+        if best_key:
             matched += 1
             match_map[ka] = {
                 "matched": True,
                 "bucket": cfg_b.bucket_name,
-                "method": "prefix_list",
+                "method": "nearest",
                 "a_key": ka,
-                "key": hit_key,
-                "offset_sec": hit_off,
-                "time_offset_range": list(cfg_b.time_offset_range),
+                "key": best_key,
+                "offset_sec": int(best_diff),
+                "time_offset_range": [lo, hi],
                 "first_line": "",
                 "first_line_ok": False,
             }
@@ -273,12 +315,12 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
             match_map[ka] = {
                 "matched": False,
                 "bucket": cfg_b.bucket_name,
-                "method": "prefix_list",
+                "method": "nearest",
                 "a_key": ka,
-                "time_offset_range": list(cfg_b.time_offset_range),
+                "time_offset_range": [lo, hi],
             }
 
-    # 4) first line read (matched only)
+    # 5) first line read (matched only)
     matched_keys = [m["key"] for m in match_map.values() if m.get("matched") and m.get("key")]
     firstline_by_key = {}
     if matched_keys:
@@ -293,7 +335,7 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
                 meta["first_line"] = line
                 meta["first_line_ok"] = bool(line)
 
-    print(f"[bucketB(prefix-list)] matched={matched}/{len(part_keys_a)}  prefixes={len(prefixes)}  listed_keys={len(all_b_keys)}  in {time.time()-t0:.2f}s")
+    print(f"[bucketB(nearest)] matched={matched}/{len(part_keys_a)}  prefixes={len(prefix_list)}  listed_keys={all_listed}  in {time.time()-t0:.2f}s")
     return match_map
 
 # =================== Env / Cython(import-only) ===================
@@ -1273,7 +1315,7 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
             # Bucket B 매칭(먼저): A key -> bucket_b_match meta
             bucket_b_match_map = {}
             if s3b:
-                bucket_b_match_map = build_bucket_b_match_map_prefixlist(part_keys, s3b, CFG_B)
+                bucket_b_match_map = build_bucket_b_match_map_nearest(part_keys, s3b, CFG_B)
 
             contents = s3.download_and_decompress_parallel(part_keys)
             if not contents:

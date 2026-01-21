@@ -57,7 +57,7 @@ class BucketBConfig:
     Bucket B 파일 매칭 규칙:
       A: YYYYMMDD/WW_LOTBASE-00SUFFIX_X_YYYYMMDD_HHMMSS.Z
       B: YYYYMMDD/LOTBASESUFFIX_WWW_YYYYMMDD_HHMMSS.gz
-    시간 오프셋: +0~+10초
+    시간 오프셋: -10~+10초
     """
     bucket_name: str = 'eds.m-eds-map-raw'
     region_name: str = ''
@@ -66,7 +66,7 @@ class BucketBConfig:
     endpoint_url: str = 'http://lakes3.dataplatform.samsungds.net:9020'
     max_pool_connections: int = 256
     enabled: bool = True
-    time_offset_range: tuple = (0, 10)
+    time_offset_range: tuple = (-10, 10)
     file_ext: str = ".gz"
     head_max_workers: int = 64
     firstline_max_bytes: int = 65536
@@ -109,14 +109,34 @@ def parse_bucket_a_key(key: str):
         "time": time_hhmmss,
     }
 
-def generate_bucket_b_candidate_keys(info: dict, offset_range=(0, 10)):
+def iter_offsets_by_closeness(offset_range):
+    """
+    offset_range 내에서 0에 가까운 순서로 오프셋을 생성.
+    예) (-2, 3) -> 0, +1, -1, +2, -2, +3
+    """
+    lo, hi = int(offset_range[0]), int(offset_range[1])
+    if hi < lo:
+        lo, hi = hi, lo
+    max_abs = max(abs(lo), abs(hi))
+    for d in range(0, max_abs + 1):
+        if d == 0:
+            offs = [0]
+        else:
+            offs = [d, -d]  # +d 우선
+        for off in offs:
+            if lo <= off <= hi:
+                yield off
+
+
+def generate_bucket_b_candidate_keys(info: dict, offset_range=(-10, 10)):
     dt0 = datetime.strptime(f"{info['date']}_{info['time']}", "%Y%m%d_%H%M%S")
-    for off in range(int(offset_range[0]), int(offset_range[1]) + 1):
-        dt = dt0 + timedelta(seconds=off)
+    for off in iter_offsets_by_closeness(offset_range):
+        dt = dt0 + timedelta(seconds=int(off))
+        folder = info.get("folder") or dt.strftime("%Y%m%d")
         day = dt.strftime("%Y%m%d")
         hhmmss = dt.strftime("%H%M%S")
-        key_b = f"{day}/{info['lot_id']}_{info['wafer_w']}_{day}_{hhmmss}{CFG_B.file_ext}"
-        yield key_b, off
+        key_b = f"{folder}/{info['lot_id']}_{info['wafer_w']}_{day}_{hhmmss}{CFG_B.file_ext}"
+        yield key_b, int(off)
 
 def _decode_best_effort(b: bytes) -> str:
     for enc in ("utf-8", "cp949", "euc-kr", "latin1"):
