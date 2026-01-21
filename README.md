@@ -24,10 +24,7 @@
 
 ### Optimized Versions
 
-| 파일 | 최적화 대상 | 설정 |
-|------|-------------|------|
-| `optimized-speed-first.py` | **최대 속도** | 256 threads, 150 chunk, 사전 로드 |
-| `optimized-memory-efficient.py` | **메모리 절약** | 64 threads, 600 chunk, 스트리밍 |
+> (삭제됨) `optimized-speed-first.py`, `optimized-memory-efficient.py` 는 유지보수 대상으로 두지 않아 저장소에서 제거했습니다.
 
 ## Architecture
 
