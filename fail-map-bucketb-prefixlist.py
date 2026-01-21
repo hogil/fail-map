@@ -775,7 +775,23 @@ def create_sample_image_func(args):
             }
         })
 
+    # ===== Bucket B match summary (첫 key로 노출) =====
+    _bm = meta0.get("bucket_b_match")
+    _match = "match실패"
+    _b_key = ""
+    _b_off = None
+    _b_first = ""
+    if isinstance(_bm, dict) and _bm.get("matched"):
+        _match = "match성공"
+        _b_key = str(_bm.get("key") or "")
+        _b_off = _bm.get("offset_sec")
+        _b_first = str(_bm.get("first_line") or "")
+
     json_obj = {
+        "match": _match,
+        "bucket_b_key": _b_key,
+        "bucket_b_offset_sec": _b_off,
+        "bucket_b_first_line": _b_first,
         "image_path": output_path,
         "root": meta0.get("root",""),
         "step": meta0.get("step",""),
@@ -804,9 +820,9 @@ def create_sample_image_func(args):
         "chips": chips_json
     }
 
-    # Bucket B 매칭 결과(성공/실패/first_line)를 wafer-level JSON에 추가
-    if meta0.get("bucket_b_match") is not None:
-        json_obj["bucket_b_match"] = meta0.get("bucket_b_match")
+    # Bucket B 매칭 상세(디버그용)
+    if _bm is not None:
+        json_obj["bucket_b_match"] = _bm
 
     json_dir = os.path.join(positions_root, _safe_prefix(p1), _safe_prefix(p2), day)
     os.makedirs(json_dir, exist_ok=True)
