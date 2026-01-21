@@ -126,41 +126,46 @@ def parse_bucket_a_filename(filename):
     """
     Bucket A 파일명 파싱
     '01_ABC123-00P_N_20260121_025936.Z'
-    → {'wafer': '01', 'lot_id': 'ABC123', 'date': '20260121', 'time': '025936'}
+    → {'wafer': '01', 'lot_id': 'ABC123P', 'date': '20260121', 'time': '025936'}
     """
-    basename = os.path.basename(filename)
-    # 패턴: WW_LOTID-00X_Y_YYYYMMDD_HHMMSS.Z
-    pattern = r'(\d{2})_([A-Z0-9]+)-00[A-Z]_[A-Z]_(\d{8})_(\d{6})\.Z'
+    # download_and_decompress_parallel()에서 "key::innerfile" 형태가 나올 수 있음
+    basename = os.path.basename(str(filename).split("::", 1)[0])
+    # 패턴: WW_LOTBASE-00SUFFIX_Y_YYYYMMDD_HHMMSS.Z
+    # 예) 01_ABC123-00P_N_20260121_025936.Z  -> lot_id = ABC123P
+    pattern = r'(\d{2})_([A-Z0-9]+)-00([A-Z])_[A-Z]_(\d{8})_(\d{6})\.Z'
     m = re.search(pattern, basename, re.IGNORECASE)
     if m:
         return {
             'wafer': m.group(1),      # 01
-            'lot_id': m.group(2),     # ABC123
-            'date': m.group(3),        # 20260121
-            'time': m.group(4)         # 025936
+            # ABC123-00P -> ABC123P  (-00 제거 + 접미사 1글자 결합)
+            'lot_id': f"{m.group(2)}{m.group(3)}",  # ABC123P
+            'date': m.group(4),        # 20260121
+            'time': m.group(5)         # 025936
         }
     return None
 
 def generate_bucket_b_patterns(info, offset_range=(0, 10)):
     """
     Bucket A 정보 → Bucket B 파일명 패턴 생성
-    {'wafer': '01', 'lot_id': 'ABC123', 'date': '20260121', 'time': '025936'}
-    → ['ABC123_W01_20260121_025936.gz', 'ABC123_W01_20260121_025937.gz', ...]
+    {'wafer': '01', 'lot_id': 'ABC123P', 'date': '20260121', 'time': '025936'}
+    → ['ABC123P_W01_20260121_025936.gz', 'ABC123P_W01_20260121_025937.gz', ...]
     """
     lot_id = info['lot_id']
     wafer = f"W{info['wafer']}"  # 01 → W01
-    date = info['date']
+    base_date = info['date']
     base_time = info['time']
 
     patterns = []
     try:
-        dt = datetime.strptime(base_time, "%H%M%S")
+        # 날짜까지 포함해서 오프셋 적용 (자정 넘어가는 케이스도 안전)
+        dt = datetime.strptime(f"{base_date}_{base_time}", "%Y%m%d_%H%M%S")
         for offset in range(offset_range[0], offset_range[1] + 1):
             new_dt = dt + timedelta(seconds=offset)
+            date = new_dt.strftime("%Y%m%d")
             time_str = new_dt.strftime("%H%M%S")
             patterns.append(f"{lot_id}_{wafer}_{date}_{time_str}.gz")
     except:
-        patterns.append(f"{lot_id}_{wafer}_{date}_{base_time}.gz")
+        patterns.append(f"{lot_id}_{wafer}_{base_date}_{base_time}.gz")
 
     return patterns
 
@@ -213,6 +218,14 @@ class FastBucketBIndex:
         for key in keys:
             basename = os.path.basename(key)
             self.basename_to_key[basename] = key
+
+        # DEBUG: 첫 5개 Bucket B 파일명 출력
+        if self.basename_to_key:
+            sample_keys = list(self.basename_to_key.keys())[:5]
+            print(f"  [DEBUG] Bucket B sample basenames:")
+            for s in sample_keys:
+                print(f"    - {s}")
+
         print(f"  [FastIndex] Built in {time.time()-t0:.2f}s, {len(self.basename_to_key)} entries")
 
     def find_matches(self, bucket_a_keys, offset_range=(0, 10)):
@@ -223,7 +236,12 @@ class FastBucketBIndex:
         t0 = time.time()
         matched = set()
 
-        for key_a in bucket_a_keys:
+        # DEBUG: 첫 5개 Bucket B 파일명 샘플 출력
+        if self.basename_to_key:
+            sample_b = list(self.basename_to_key.keys())[:5]
+            print(f"  [DEBUG] Bucket B sample filenames: {sample_b}")
+
+        for idx, key_a in enumerate(bucket_a_keys):
             info = parse_bucket_a_filename(key_a)
             if not info:
                 continue
@@ -231,13 +249,95 @@ class FastBucketBIndex:
             # Bucket B 패턴 생성
             b_patterns = generate_bucket_b_patterns(info, offset_range)
 
+            # DEBUG: 첫 3개만 상세 출력
+            if idx < 3:
+                print(f"  [DEBUG] Bucket A key: {os.path.basename(key_a)}")
+                print(f"  [DEBUG] Parsed info: {info}")
+                print(f"  [DEBUG] Generated patterns (first 3): {b_patterns[:3]}")
+
             # 각 패턴을 basename 인덱스에서 검색
             for pattern in b_patterns:
                 if pattern in self.basename_to_key:
                     matched.add(self.basename_to_key[pattern])
+                    if idx < 3:
+                        print(f"  [DEBUG] ✓ Matched: {pattern}")
 
         print(f"  [FastIndex] Matched {len(matched)} keys in {time.time()-t0:.2f}s")
         return list(matched)
+
+    def find_match_map(self, bucket_a_keys, offset_range=(0, 10)):
+        """
+        Bucket A key -> Bucket B key 매핑을 반환 (첫 매칭 기준)
+        returns:
+          - a_to_b: {key_a: key_b or None}
+          - matched_keys: unique list of key_b
+        """
+        t0 = time.time()
+        a_to_b = {}
+        matched = set()
+        parsed = 0
+        matched_a = 0
+
+        for idx, key_a in enumerate(bucket_a_keys):
+            info = parse_bucket_a_filename(key_a)
+            if not info:
+                a_to_b[key_a] = None
+                continue
+            parsed += 1
+
+            b_patterns = generate_bucket_b_patterns(info, offset_range)
+            hit = None
+            for pattern in b_patterns:
+                hit = self.basename_to_key.get(pattern)
+                if hit:
+                    break
+            a_to_b[key_a] = hit
+            if hit:
+                matched.add(hit)
+                matched_a += 1
+
+            # DEBUG: 첫 3개만 상세 출력
+            if idx < 3:
+                print(f"\n  [DEBUG] A[{idx}] Full key: {key_a}")
+                print(f"  [DEBUG] A[{idx}] Basename: {os.path.basename(key_a)}")
+                print(f"  [DEBUG] A[{idx}] Parsed: {info}")
+                print(f"  [DEBUG] A[{idx}] Generated B patterns (showing first 3 of {len(b_patterns)}):")
+                for p in b_patterns[:3]:
+                    exists = "✓" if p in self.basename_to_key else "✗"
+                    print(f"    {exists} {p}")
+                print(f"  [DEBUG] A[{idx}] Match result: {'✓ MATCHED' if hit else '✗ NO MATCH'}")
+                if hit:
+                    print(f"  [DEBUG] A[{idx}] Matched B key: {hit}")
+
+        print(f"  [FastIndexMap] Parsed={parsed}/{len(bucket_a_keys)}  MatchedA={matched_a}/{len(bucket_a_keys)}  UniqueB={len(matched)}  in {time.time()-t0:.2f}s")
+        return a_to_b, list(matched)
+
+
+def _decode_best_effort(b: bytes) -> str:
+    for enc in ("utf-8", "cp949", "euc-kr", "latin1"):
+        try:
+            return b.decode(enc)
+        except:
+            pass
+    return b.decode("utf-8", errors="ignore")
+
+
+def read_bucket_b_gz_first_line(client, bucket: str, key: str, max_bytes: int = 65536) -> str:
+    """
+    Bucket B (.gz) 파일의 '압축 해제된' 첫 줄만 읽는다.
+    - 성공 시: str (개행 제거)
+    - 실패 시: "" (빈 문자열)
+    """
+    try:
+        obj = client.get_object(Bucket=bucket, Key=key)
+        body = obj["Body"]
+        with gzip.GzipFile(fileobj=body) as gz:
+            line = gz.readline(max_bytes)
+        if not line:
+            return ""
+        return _decode_best_effort(line).rstrip("\r\n")
+    except:
+        return ""
 
 def join_contents_by_filename(contents_a, contents_b, offset_range=(0, 10)):
     """
@@ -251,6 +351,9 @@ def join_contents_by_filename(contents_a, contents_b, offset_range=(0, 10)):
     for name_b, text_b in contents_b:
         basename_b = os.path.basename(name_b)
         b_index[basename_b] = (name_b, text_b)
+        # .gz가 _expand() 과정에서 제거될 수 있음 -> 패턴(… .gz) 매칭을 위해 보정
+        if not basename_b.lower().endswith(".gz"):
+            b_index[basename_b + ".gz"] = (name_b, text_b)
 
     # Bucket A 기준으로 매칭
     joined = {}
@@ -428,6 +531,9 @@ def process_file_content(args):
     if not lines:
         return []
 
+    # Save first line for Bucket B matching verification
+    first_line = lines[0] if lines else ""
+
     # header values
     stime  = _parse_stime(lines)
     partid = _hval(lines, ":PARTID=")
@@ -476,7 +582,9 @@ def process_file_content(args):
             "transformed_values": hex_block,
             "stime": stime,
             "rot": rot,
-            "partid": partid, "tester": tester, "device": device, "pgm": pgm
+            "partid": partid, "tester": tester, "device": device, "pgm": pgm,
+            "first_line": first_line,  # Bucket B 매칭 검증용
+            "orig_filename": file_name  # 원본 파일명
         }
         i += 1
 
@@ -752,6 +860,11 @@ def create_sample_image_func(args):
         },
         "chips": chips_json
     }
+
+    # [NEW] Bucket B 매칭 상태/첫줄을 positions json top-level에 기록
+    # (성공/실패를 눈으로 확인 가능)
+    if meta0.get("bucket_b_match") is not None:
+        json_obj["bucket_b_match"] = meta0.get("bucket_b_match")
 
     json_dir = os.path.join(positions_root, _safe_prefix(p1), _safe_prefix(p2), day)
     os.makedirs(json_dir, exist_ok=True)
@@ -1223,10 +1336,47 @@ def run_dual_bucket_pipeline(df: pd.DataFrame):
             print(f"\n🔥 Global Chunk {idx}/{total_chunks} size={len(part_keys_a)} (now={datetime.now():%Y-%m-%d %H:%M:%S})")
             t_chunk = time.time()
 
-            # Bucket B 매칭 keys 찾기
+            # Bucket B 매칭 (A->B) + Bucket B first-line 읽기(성공/실패 확인용)
             part_keys_b = []
-            if bucket_b_index:
-                part_keys_b = bucket_b_index.find_matches(part_keys_a, CFG_B.time_offset_range)
+            a_to_b = {}
+            bucket_b_first_line = {}
+            bucket_b_meta_by_a = {}
+            if bucket_b_index and s3_b:
+                a_to_b, part_keys_b = bucket_b_index.find_match_map(part_keys_a, CFG_B.time_offset_range)
+
+                matched_a = sum(1 for v in a_to_b.values() if v)
+                print(f"  [bucketB-match] matchedA={matched_a}/{len(part_keys_a)} uniqueB={len(part_keys_b)}")
+
+                # Bucket B 파일의 첫 줄만 읽어서 positions json에 남김
+                if part_keys_b:
+                    def _read_one(kb):
+                        return kb, read_bucket_b_gz_first_line(s3_b.client, CFG_B.bucket_name, kb)
+
+                    max_workers = min(64, max(1, int(getattr(CFG_B, 'download_threads', 32))))
+                    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                        for kb, line in ex.map(_read_one, part_keys_b):
+                            bucket_b_first_line[kb] = line
+
+                    ok_first = sum(1 for v in bucket_b_first_line.values() if v)
+                    print(f"  [bucketB-firstline] ok={ok_first}/{len(part_keys_b)}")
+
+                # A key 별로 메타(성공/실패/첫줄)를 만들어 dataset_a에 주입
+                for ka in part_keys_a:
+                    kb = a_to_b.get(ka)
+                    if kb:
+                        bucket_b_meta_by_a[ka] = {
+                            "matched": True,
+                            "bucket": CFG_B.bucket_name,
+                            "key": kb,
+                            "first_line": bucket_b_first_line.get(kb, ""),
+                            "time_offset_range": list(CFG_B.time_offset_range),
+                        }
+                    else:
+                        bucket_b_meta_by_a[ka] = {
+                            "matched": False,
+                            "bucket": CFG_B.bucket_name,
+                            "time_offset_range": list(CFG_B.time_offset_range),
+                        }
 
             # 병렬 다운로드
             contents_a = None
@@ -1260,6 +1410,15 @@ def run_dual_bucket_pipeline(df: pd.DataFrame):
                 tagged_pairs_a.append((tok, p1, p2, name, text))
 
             dataset_a = proc.process_files_parallel_tagged(tagged_pairs_a)
+            print(f"  [datasetA] chips={len(dataset_a)}")
+
+            # [NEW] positions json에 매칭 성공/실패를 남기기 위해 dataset_a에 주입
+            if bucket_b_meta_by_a:
+                for item in dataset_a:
+                    ka = str(item.get("orig_filename", "")).split("::", 1)[0]
+                    meta = bucket_b_meta_by_a.get(ka)
+                    if meta is not None:
+                        item["bucket_b_match"] = meta
 
             # Bucket B 처리 및 병합
             if contents_b:
@@ -1301,6 +1460,7 @@ def run_dual_bucket_pipeline(df: pd.DataFrame):
                 continue
 
             imgs, img_ok_by_key = img.generate_images_mixed(dataset_a, base_root=CFG.base_root, positions_root=CFG.positions_root)
+            print(f"  [images] generated={len(imgs)}")
 
             # simple accumulate
             from collections import Counter, defaultdict
