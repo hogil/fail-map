@@ -34,7 +34,7 @@ from botocore.config import Config
 @dataclass
 class PipelineConfig:
     bucket_name: str = 'eds-ec-memory.fbm-data'
-    secondary_bucket_name: str = 'eds-ec-memory.fbm-data-sub'  # [NEW] Secondary Bucket
+    secondary_bucket_name: str = 'eds.m-eds-map-raw'  # [NEW] Secondary Bucket
     region_name: str = ''
     aws_access_key_id: str = 'ho.choi-LakeS3-F6B0U6'            # 요청: 자동 치환 금지
     aws_secret_access_key: str = 'iYb7zYDVzitt4QVkUcR2'         # 요청: 자동 치환 금지
@@ -501,49 +501,62 @@ class S3Manager:
         candidate_map = {}
         
         for d in dataset_A:
-            tok = d.get('token')
-            wafer = d.get('wafer')
-            step = d.get('step')
-            stime = d.get('stime') # YYYYMMDD_HHMMSS
+            # We need original filename info to construct the key
+            # Assuming 'orig_name' is injected in run_pipeline
+            orig_name = d.get('orig_name', '')
+            if not orig_name: continue
             
-            if not (tok and wafer and step and stime): continue
-            
-            dt = _parse_stime_dt(stime)
-            if not dt: continue
-            
-            # Assumption: Filename format is "YYYYMMDD/TOKEN_WAFER_STEP_HHMMSS.json"
-            # Adjust this format as needed!
-            day_str = dt.strftime("%Y%m%d")
-            
+            # Filename: 01_ABC123-00P_N_20260121_025936.Z
+            try:
+                base = os.path.basename(orig_name)
+                parts = base.split('_')
+                if len(parts) < 4: continue
+                
+                wafer_num = parts[0]  # "01"
+                lot_part = parts[1]   # "ABC123-00P"
+                date_part = parts[-2] # "20260121"
+                time_part = parts[-1].split('.')[0] # "025936"
+                
+                # Lot conversion: ABC123-00P -> ABC123P
+                if "-00" in lot_part:
+                    lot_base, suffix = lot_part.split("-00", 1)
+                    new_lot = lot_base + suffix
+                else:
+                    new_lot = lot_part
+                
+                new_wafer = f"W{wafer_num}"
+                
+                dt = datetime.strptime(f"{date_part}_{time_part}", "%Y%m%d_%H%M%S")
+            except:
+                continue
+
             # Generate 11 candidates (0 to 10 seconds delay)
             for delay in range(11):
                 target_dt = dt + timedelta(seconds=delay)
-                ts_str = target_dt.strftime("%H%M%S")
+                # Date might change if crossing midnight?
+                # But user example suggests same day folder: 20260121/FILENAME
+                # If day changes, folder changes.
+                target_day_str = target_dt.strftime("%Y%m%d")
+                target_ts_str = target_dt.strftime("%H%M%S")
                 
-                # Construct Key
-                # Example: "20260111/TOKEN_WAFER_STEP_120005.json"
-                # Note: Ensure wafer/step format matches exactly what's in S3
-                # You might need to adjust separators or formatting here.
-                cand_key = f"{day_str}/{tok}_{wafer}_{step}_{ts_str}.json"
+                # Key: YYYYMMDD/ABC123P_W01_YYYYMMDD_HHMMSS.gz
+                cand_key = f"{target_day_str}/{new_lot}_{new_wafer}_{target_day_str}_{target_ts_str}.gz"
                 
-                candidate_map[cand_key] = (tok, wafer, step)
+                meta_key = (d.get('token'), d.get('wafer'), d.get('step'))
+                candidate_map[cand_key] = meta_key
 
         # 2. Parallel Try-Download
-        # We use a large thread pool because most requests will 404 (fast fail)
         results = {}
         
         def _try_get(key):
             try:
                 obj = self.client.get_object(Bucket=self.cfg.secondary_bucket_name, Key=key)
-                data = json.load(obj['Body'])
+                with gzip.GzipFile(fileobj=obj['Body']) as gz:
+                    data = json.load(gz)
                 return (key, data)
             except:
                 return None
 
-        # Only download if we haven't found a match for this (tok, wafer, step) yet?
-        # Ideally yes, but parallel execution makes it hard to coordinate.
-        # Just fire all, and pick one later.
-        
         with ThreadPoolExecutor(max_workers=128) as ex:
             futures = {ex.submit(_try_get, k): k for k in candidate_map.keys()}
             
@@ -551,9 +564,7 @@ class S3Manager:
                 res = fut.result()
                 if res:
                     key, data = res
-                    meta_key = candidate_map[key] # (tok, wafer, step)
-                    # If multiple matches (e.g. +1s and +2s both exist), last one wins or first one?
-                    # We just overwrite.
+                    meta_key = candidate_map[key]
                     results[meta_key] = data
 
         return results
@@ -661,6 +672,12 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
             del contents
 
             dataset_all = proc.process_files_parallel_tagged(tagged_pairs)
+            
+            # Inject Original Filename
+            for i, d in enumerate(dataset_all):
+                if i < len(tagged_pairs):
+                    d['orig_name'] = tagged_pairs[i][3]
+
             kept = []
             for s in dataset_all:
                 dt = _parse_stime_dt(s.get('stime'))
