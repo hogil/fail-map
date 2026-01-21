@@ -1347,19 +1347,6 @@ def run_dual_bucket_pipeline(df: pd.DataFrame):
                 matched_a = sum(1 for v in a_to_b.values() if v)
                 print(f"  [bucketB-match] matchedA={matched_a}/{len(part_keys_a)} uniqueB={len(part_keys_b)}")
 
-                # Bucket B 파일의 첫 줄만 읽어서 positions json에 남김
-                if part_keys_b:
-                    def _read_one(kb):
-                        return kb, read_bucket_b_gz_first_line(s3_b.client, CFG_B.bucket_name, kb)
-
-                    max_workers = min(64, max(1, int(getattr(CFG_B, 'download_threads', 32))))
-                    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                        for kb, line in ex.map(_read_one, part_keys_b):
-                            bucket_b_first_line[kb] = line
-
-                    ok_first = sum(1 for v in bucket_b_first_line.values() if v)
-                    print(f"  [bucketB-firstline] ok={ok_first}/{len(part_keys_b)}")
-
                 # A key 별로 메타(성공/실패/첫줄)를 만들어 dataset_a에 주입
                 for ka in part_keys_a:
                     kb = a_to_b.get(ka)
@@ -1368,7 +1355,7 @@ def run_dual_bucket_pipeline(df: pd.DataFrame):
                             "matched": True,
                             "bucket": CFG_B.bucket_name,
                             "key": kb,
-                            "first_line": bucket_b_first_line.get(kb, ""),
+                            "first_line": "",
                             "time_offset_range": list(CFG_B.time_offset_range),
                         }
                     else:
@@ -1396,6 +1383,30 @@ def run_dual_bucket_pipeline(df: pd.DataFrame):
             if not contents_a:
                 print("  -> empty chunk")
                 continue
+
+            # Bucket B 첫 줄 추출 (중복 다운로드 방지: contents_b에서 파생)
+            if contents_b and bucket_b_meta_by_a:
+                part_b_set = set(part_keys_b or [])
+                for name_b, text_b in contents_b:
+                    k0 = str(name_b).split("::", 1)[0]
+                    kb = k0
+                    # _expand()에서 .gz 확장자가 제거될 수 있음 -> 보정
+                    if (not kb.lower().endswith(CFG_B.file_pattern)) and ((kb + CFG_B.file_pattern) in part_b_set):
+                        kb = kb + CFG_B.file_pattern
+                    if kb in part_b_set:
+                        # splitlines() 전체 생성 방지: 첫 줄만
+                        first_line = (text_b.split("\n", 1)[0].rstrip("\r") if text_b else "")
+                        bucket_b_first_line[kb] = first_line
+
+                ok_first = sum(1 for kb in part_b_set if bucket_b_first_line.get(kb))
+                print(f"  [bucketB-firstline] ok={ok_first}/{len(part_b_set)}")
+
+                # bucket_b_meta_by_a에 first_line 주입
+                for meta in bucket_b_meta_by_a.values():
+                    kb = meta.get("key")
+                    if kb:
+                        meta["first_line"] = bucket_b_first_line.get(kb, "")
+                        meta["first_line_ok"] = bool(meta.get("first_line"))
 
             # Bucket A 처리
             tagged_pairs_a = []
