@@ -162,7 +162,8 @@ class S3ManagerB:
         out = []
         token = None
         while True:
-            kw = dict(Bucket=self.cfg.bucket_name, Prefix=prefix, MaxKeys=1000)
+            # Delimiter='/' 를 주면 prefix 아래의 \"폴더\" 경계로 끊어서 조회 (지금 구조에선 결과는 동일하지만 의도 명확)
+            kw = dict(Bucket=self.cfg.bucket_name, Prefix=prefix, Delimiter='/', MaxKeys=1000)
             if token:
                 kw["ContinuationToken"] = token
             resp = self.client.list_objects_v2(**kw)
