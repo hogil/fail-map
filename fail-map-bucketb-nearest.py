@@ -292,10 +292,24 @@ def build_bucket_b_match_map_nearest(part_keys_a, s3b: S3ManagerB, cfg_b: Bucket
                 "method": "nearest",
                 "reason": "parse_failed",
                 "time_offset_range": [lo, hi],
+                "expected_key0": "",
+                "expected_range": "",
             }
             continue
 
         dt_a = datetime.strptime(f"{info['date']}_{info['time']}", "%Y%m%d_%H%M%S")
+        # mismatch 로그에 같이 저장할 "Bucket B 변환 형식" (offset=0 기준) / 검색 범위
+        expected_key0 = ""
+        expected_range = ""
+        try:
+            dt0 = dt_a
+            dt_lo = dt0 + timedelta(seconds=lo)
+            dt_hi = dt0 + timedelta(seconds=hi)
+            folder_a = info.get("folder") or info.get("date") or dt0.strftime("%Y%m%d")
+            expected_key0 = f"{folder_a}/{info['lot_id']}_{info['wafer_w']}_{dt0:%Y%m%d}_{dt0:%H%M%S}{cfg_b.file_ext}"
+            expected_range = f"{dt_lo:%Y%m%d_%H%M%S}~{dt_hi:%Y%m%d_%H%M%S}"
+        except:
+            pass
         # 이 A에서 사용할 prefix는 1개 (generate_bucket_b_prefixes가 lot+wafer prefix 1개를 yield)
         prefixes_a = list(generate_bucket_b_prefixes(info, cfg_b.time_offset_range))
 
@@ -324,6 +338,8 @@ def build_bucket_b_match_map_nearest(part_keys_a, s3b: S3ManagerB, cfg_b: Bucket
                 "key": best_key,
                 "offset_sec": int(best_diff),
                 "time_offset_range": [lo, hi],
+                "expected_key0": expected_key0,
+                "expected_range": expected_range,
                 "first_line": "",
                 "first_line_ok": False,
             }
@@ -334,6 +350,8 @@ def build_bucket_b_match_map_nearest(part_keys_a, s3b: S3ManagerB, cfg_b: Bucket
                 "method": "nearest",
                 "a_key": ka,
                 "time_offset_range": [lo, hi],
+                "expected_key0": expected_key0,
+                "expected_range": expected_range,
             }
 
     # 5) first line read (matched only)
@@ -1320,7 +1338,7 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
                 f"bucketb_mismatch_{Path(__file__).stem}_{datetime.now():%Y%m%d_%H%M%S}.txt",
             )
             with open(mismatch_out_path, "w", encoding="utf-8", newline="\n") as f:
-                f.write("window_start\twindow_end\tchunk_idx\tchunk_total\tchunk_keys\tchunk_fail\ta_key\treason\n")
+                f.write("window_start\twindow_end\tchunk_idx\tchunk_total\tchunk_keys\tchunk_fail\ta_key\tb_expected_key0\tb_expected_range\treason\n")
             print(f"[bucketB] mismatch_log={mismatch_out_path}")
 
         # 1차 필터: 파일명(basename)에서 token+시간 뽑아 시간창으로 key 선정
@@ -1436,9 +1454,11 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
                     lines = []
                     for _ka in mismatch_this:
                         _meta = bucket_b_match_map.get(_ka) or {}
+                        _b0 = _meta.get("expected_key0") or ""
+                        _br = _meta.get("expected_range") or ""
                         _reason = _meta.get("reason") or "not_found"
                         lines.append(
-                            f"{window_start_s}\t{window_end_s}\t{idx}\t{total_chunks}\t{len(part_keys)}\t{_fail}\t{_ka}\t{_reason}\n"
+                            f"{window_start_s}\t{window_end_s}\t{idx}\t{total_chunks}\t{len(part_keys)}\t{_fail}\t{_ka}\t{_b0}\t{_br}\t{_reason}\n"
                         )
                     with open(mismatch_out_path, "a", encoding="utf-8", newline="\n") as f:
                         f.write("".join(lines))
