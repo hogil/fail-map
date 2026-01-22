@@ -132,6 +132,11 @@ python fail-map-dual-bucket.py
 python fail-map-bucketb-prefixlist.py
 ```
 
+### Bucket B 매칭 + positions JSON 기록 (prefixlist + fallback: 후보 없으면 closest 선택)
+```bash
+python fail-map-bucketb-prefixlist-fallback.py
+```
+
 ### Bucket B 매칭 + positions JSON 기록 (list 없이 HEAD 방식)
 ```bash
 python fail-map-bucketb-head.py
@@ -227,10 +232,11 @@ pip install unlzw3 py7zr  # 압축 해제
 ## Performance Tips
 
 1. **기본 추천**: `fail-map-bucketb-prefixlist.py` (S3 list 최소화 + 빠름)
-2. **list 호출이 부담**: `fail-map-bucketb-head.py` (list 없이 HEAD로 찌름)
-3. **여러 후보 중 가장 가까운 시간 선택**: `fail-map-bucketb-nearest.py`
-4. **시간차가 종종 ±범위를 벗어남**: `fail-map-bucketb-closest.py` (가장 가까운 시간으로 항상 1개 선택)
-5. **Bucket B 데이터까지 실제로 파싱/병합**: `fail-map-dual-bucket.py`
+2. **prefixlist인데 시간차가 종종 ±범위를 벗어남**: `fail-map-bucketb-prefixlist-fallback.py` (먼저 예측으로 찾고, 없으면 closest)
+3. **list 호출이 부담**: `fail-map-bucketb-head.py` (list 없이 HEAD로 찌름)
+4. **여러 후보 중 가장 가까운 시간 선택**: `fail-map-bucketb-nearest.py`
+5. **시간차가 종종 ±범위를 벗어남**: `fail-map-bucketb-closest.py` (가장 가까운 시간으로 항상 1개 선택)
+6. **Bucket B 데이터까지 실제로 파싱/병합**: `fail-map-dual-bucket.py`
 
 ## How It Works
 
