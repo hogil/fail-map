@@ -226,38 +226,61 @@ class S3ManagerB:
         except:
             return ""
 
-def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: BucketBConfig, chunk_label: str = ""):
+def build_bucket_b_match_map_closest(part_keys_a, s3b: S3ManagerB, cfg_b: BucketBConfig):
     """
+    동일 날짜 폴더(YYYYMMDD/) + lot_id + wafer prefix로 key들을 전부 list 한 뒤,
+    여러 개면 A와 가장 가까운 시간(B)을 매칭한다. (시간 차이 제한 없음)
     returns: dict[a_key] -> match_meta
     """
     t0 = time.time()
     lo, hi = int(cfg_b.time_offset_range[0]), int(cfg_b.time_offset_range[1])
     if hi < lo:
         lo, hi = hi, lo
+
     infos = {}
     for ka in part_keys_a:
         info = parse_bucket_a_key(ka)
         if info:
             infos[ka] = info
 
-    # 1) prefix 수집
+    # 1) prefix 수집 (folder/LOT_W01_)
     prefixes = set()
     for info in infos.values():
         for pfx in generate_bucket_b_prefixes(info, cfg_b.time_offset_range):
             prefixes.add(pfx)
 
-    # 2) prefix 별 list (전체 key set만 생성) - 빠른 membership 체크용
-    all_b_keys_set = set()
-    listed_total = 0
-    if prefixes:
+    # 2) prefix 별 list
+    prefix_list = sorted(prefixes)
+    prefix_to_keys = {p: [] for p in prefix_list}
+    all_listed = 0
+    if prefix_list:
         with ThreadPoolExecutor(max_workers=cfg_b.list_max_workers) as ex:
-            for keys in ex.map(s3b.list_keys_with_prefix, sorted(prefixes)):
-                ks = keys or []
-                listed_total += len(ks)
-                for k in ks:
-                    all_b_keys_set.add(k)
+            for p, keys in zip(prefix_list, ex.map(s3b.list_keys_with_prefix, prefix_list)):
+                prefix_to_keys[p] = keys or []
+                all_listed += len(prefix_to_keys[p])
 
-    # 3) A -> B 매칭
+    # 3) prefix -> (key, dt_b) 캐시
+    prefix_to_parsed = {}
+    for p, keys in prefix_to_keys.items():
+        arr = []
+        for kb in keys:
+            bn = os.path.basename(str(kb))
+            if not bn.lower().endswith(cfg_b.file_ext):
+                continue
+            base = bn[: -len(cfg_b.file_ext)]
+            parts = base.split("_")
+            if len(parts) < 4:
+                continue
+            date = parts[-2]
+            hhmmss = parts[-1]
+            try:
+                dt_b = datetime.strptime(f"{date}_{hhmmss}", "%Y%m%d_%H%M%S")
+            except:
+                continue
+            arr.append((kb, dt_b))
+        prefix_to_parsed[p] = arr
+
+    # 4) A -> B 매칭 (closest time, no range limit)
     match_map = {}
     matched = 0
     for ka in part_keys_a:
@@ -266,7 +289,7 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
             match_map[ka] = {
                 "matched": False,
                 "bucket": cfg_b.bucket_name,
-                "method": "prefix_list",
+                "method": "closest",
                 "reason": "parse_failed",
                 "time_offset_range": [lo, hi],
                 "expected_key0": "",
@@ -274,11 +297,12 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
             }
             continue
 
+        dt_a = datetime.strptime(f"{info['date']}_{info['time']}", "%Y%m%d_%H%M%S")
         # mismatch 로그에 같이 저장할 "Bucket B 변환 형식" (offset=0 기준) / 검색 범위
         expected_key0 = ""
         expected_range = ""
         try:
-            dt0 = datetime.strptime(f"{info['date']}_{info['time']}", "%Y%m%d_%H%M%S")
+            dt0 = dt_a
             dt_lo = dt0 + timedelta(seconds=lo)
             dt_hi = dt0 + timedelta(seconds=hi)
             folder_a = info.get("folder") or info.get("date") or dt0.strftime("%Y%m%d")
@@ -286,28 +310,34 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
             expected_range = f"{dt_lo:%Y%m%d_%H%M%S}~{dt_hi:%Y%m%d_%H%M%S}"
         except:
             pass
+        # 이 A에서 사용할 prefix는 1개 (generate_bucket_b_prefixes가 lot+wafer prefix 1개를 yield)
+        prefixes_a = list(generate_bucket_b_prefixes(info, cfg_b.time_offset_range))
 
-        # 예상 시간범위 내 후보 key를 만들어서 존재 여부 확인 (prefixlist 원래 방식)
-        hit_key = None
-        hit_off = None
-        for kb, off in generate_bucket_b_candidate_keys(info, cfg_b.time_offset_range):
-            if kb in all_b_keys_set:
-                hit_key = kb
-                hit_off = int(off)
-                break
-        if hit_key:
+        best = None
+        best_key = None
+        best_diff = None
+        for pfx in prefixes_a:
+            for kb, dt_b in prefix_to_parsed.get(pfx, []):
+                diff = int(round((dt_b - dt_a).total_seconds()))
+                # tie-break: abs(diff) 작은 것 우선, abs 같으면 +쪽(미래) 우선
+                score = (abs(diff), 0 if diff >= 0 else 1)
+                if best is None or score < best:
+                    best = score
+                    best_key = kb
+                    best_diff = diff
+
+        if best_key:
             matched += 1
             match_map[ka] = {
                 "matched": True,
                 "bucket": cfg_b.bucket_name,
-                "method": "prefix_list",
+                "method": "closest",
                 "a_key": ka,
-                "key": hit_key,
-                "offset_sec": hit_off,
+                "key": best_key,
+                "offset_sec": int(best_diff),
                 "time_offset_range": [lo, hi],
                 "expected_key0": expected_key0,
                 "expected_range": expected_range,
-                "reason": "predicted_hit",
                 "first_line": "",
                 "first_line_ok": False,
             }
@@ -315,15 +345,14 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
             match_map[ka] = {
                 "matched": False,
                 "bucket": cfg_b.bucket_name,
-                "method": "prefix_list",
+                "method": "closest",
                 "a_key": ka,
                 "time_offset_range": [lo, hi],
                 "expected_key0": expected_key0,
                 "expected_range": expected_range,
-                "reason": "not_found",
             }
 
-    # 4) first line read (matched only)
+    # 5) first line read (matched only)
     matched_keys = [m["key"] for m in match_map.values() if m.get("matched") and m.get("key")]
     firstline_by_key = {}
     if matched_keys:
@@ -338,15 +367,7 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
                 meta["first_line"] = line
                 meta["first_line_ok"] = bool(line)
 
-    parse_failed = sum(1 for m in match_map.values() if m.get("reason") == "parse_failed")
-    firstline_ok = sum(1 for m in match_map.values() if m.get("matched") and m.get("first_line_ok"))
-    lbl = f" {chunk_label}" if chunk_label else ""
-    read_part = (f" read_ok={firstline_ok}/{matched}" if matched else " read_ok=0")
-    print(
-        f"[bucketB(prefix-list){lbl}] match성공={matched}/{len(part_keys_a)}"
-        f"{read_part} parse_failed={parse_failed} prefixes={len(prefixes)} listed_keys={listed_total}"
-        f" in {time.time()-t0:.2f}s"
-    )
+    print(f"[bucketB(closest)] matched={matched}/{len(part_keys_a)}  prefixes={len(prefix_list)}  listed_keys={all_listed}  in {time.time()-t0:.2f}s")
     return match_map
 
 # =================== Env / Cython(import-only) ===================
@@ -1293,6 +1314,8 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
     t0 = time.time()
     results = {}
     bucketb_mismatched_keys = set()
+    bucketb_global_neg = None  # (off, a_key, b_key)
+    bucketb_global_pos = None  # (off, a_key, b_key)
     mismatch_out_path = None
     try:
         folders = s3.get_top_level_folders()
@@ -1340,7 +1363,7 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
             # Bucket B 매칭(먼저): A key -> bucket_b_match meta
             bucket_b_match_map = {}
             if s3b:
-                bucket_b_match_map = build_bucket_b_match_map_prefixlist(part_keys, s3b, CFG_B, chunk_label=f"{idx}/{total_chunks}")
+                bucket_b_match_map = build_bucket_b_match_map_closest(part_keys, s3b, CFG_B)
 
             contents = s3.download_and_decompress_parallel(part_keys)
             if not contents:
@@ -1401,6 +1424,23 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
                 _succ = sum(1 for v in bucket_b_match_map.values() if v.get("matched"))
                 _fail = len(bucket_b_match_map) - _succ
                 _read_ok = sum(1 for v in bucket_b_match_map.values() if v.get("matched") and v.get("first_line_ok"))
+                # chunk별 offset 극값(-/+ 방향) 계산
+                chunk_neg = None  # (off, a_key, b_key)
+                chunk_pos = None  # (off, a_key, b_key)
+                for _ka, _meta in bucket_b_match_map.items():
+                    if not (_meta or {}).get("matched"):
+                        continue
+                    _off = (_meta or {}).get("offset_sec")
+                    if _off is None:
+                        continue
+                    _off = int(_off)
+                    _bk = (_meta or {}).get("key") or ""
+                    if _off < 0:
+                        if chunk_neg is None or _off < chunk_neg[0]:
+                            chunk_neg = (_off, _ka, _bk)
+                    elif _off > 0:
+                        if chunk_pos is None or _off > chunk_pos[0]:
+                            chunk_pos = (_off, _ka, _bk)
 
                 # mismatch: chunk마다 파일에 append 저장 (원본 A key만)
                 mismatch_this = []
@@ -1408,7 +1448,6 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
                     if not (_meta or {}).get("matched"):
                         mismatch_this.append(_ka)
                         bucketb_mismatched_keys.add(_ka)
-
                 if mismatch_out_path and mismatch_this:
                     lines = []
                     for _ka in mismatch_this:
@@ -1422,8 +1461,22 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
                     with open(mismatch_out_path, "a", encoding="utf-8", newline="\n") as f:
                         f.write("".join(lines))
 
+                # global 갱신
+                if chunk_neg is not None and (bucketb_global_neg is None or chunk_neg[0] < bucketb_global_neg[0]):
+                    bucketb_global_neg = chunk_neg
+                if chunk_pos is not None and (bucketb_global_pos is None or chunk_pos[0] > bucketb_global_pos[0]):
+                    bucketb_global_pos = chunk_pos
+
+                neg_s = "None"
+                pos_s = "None"
+                if chunk_neg is not None:
+                    neg_s = f"{chunk_neg[0]} (A={chunk_neg[1]} B={chunk_neg[2]})"
+                if chunk_pos is not None:
+                    pos_s = f"+{chunk_pos[0]} (A={chunk_pos[1]} B={chunk_pos[2]})"
+
                 print(
-                    f"  -> chunk done in {round(time.time()-t_chunk, 2)}s  [bucketB] 성공={_succ} 실패={_fail} read_ok={_read_ok}/{_succ if _succ else 0}"
+                    f"  -> chunk done in {round(time.time()-t_chunk, 2)}s  [bucketB] 성공={_succ} 실패={_fail} read_ok={_read_ok}/{_succ if _succ else 0}  "
+                    f"neg_max={neg_s}  pos_max={pos_s}"
                     + (f"  mismatch_append={len(mismatch_this)} total_saved={len(bucketb_mismatched_keys)}" if mismatch_out_path else "")
                 )
             else:
@@ -1441,8 +1494,16 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
         if removed:
             print(f"[cleanup] removed {removed} empty dirs")
 
-        # mismatch 파일은 chunk마다 append 저장되며, 여기서는 요약만 출력
+        # mismatch 파일은 chunk마다 append 저장되며, 여기서는 최종 요약만 출력
         if s3b and mismatch_out_path:
+            # 최종 offset 극값 출력
+            gneg_s = "None"
+            gpos_s = "None"
+            if bucketb_global_neg is not None:
+                gneg_s = f"{bucketb_global_neg[0]} (A={bucketb_global_neg[1]} B={bucketb_global_neg[2]})"
+            if bucketb_global_pos is not None:
+                gpos_s = f"+{bucketb_global_pos[0]} (A={bucketb_global_pos[1]} B={bucketb_global_pos[2]})"
+            print(f"[bucketB] overall neg_max={gneg_s}  pos_max={gpos_s}")
             print(f"[bucketB] mismatch_keys_total={len(bucketb_mismatched_keys)} saved={mismatch_out_path}")
 
         print(f"\n✅ Global done in {total_secs}s")
