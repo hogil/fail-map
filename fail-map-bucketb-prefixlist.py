@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os, re, sys, time, json, io, zipfile, tempfile, shutil, gzip, tarfile, subprocess, importlib, multiprocessing
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
@@ -246,13 +247,46 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
         for pfx in generate_bucket_b_prefixes(info, cfg_b.time_offset_range):
             prefixes.add(pfx)
 
-    # 2) prefix 별 list
-    all_b_keys = set()
-    if prefixes:
+    # 2) prefix 별 list (prefix -> keys) + 전체 key set
+    prefix_list = sorted(prefixes)
+    prefix_to_keys = {p: [] for p in prefix_list}
+    all_b_keys_set = set()
+    all_listed = 0
+    if prefix_list:
         with ThreadPoolExecutor(max_workers=cfg_b.list_max_workers) as ex:
-            for keys in ex.map(s3b.list_keys_with_prefix, sorted(prefixes)):
-                for k in keys:
-                    all_b_keys.add(k)
+            for p, keys in zip(prefix_list, ex.map(s3b.list_keys_with_prefix, prefix_list)):
+                ks = keys or []
+                prefix_to_keys[p] = ks
+                all_listed += len(ks)
+                for k in ks:
+                    all_b_keys_set.add(k)
+
+    # 2.5) prefix -> (sorted dts, keys)  (nearest fallback용)
+    prefix_to_dt_keys = {}
+    for p, keys in prefix_to_keys.items():
+        arr = []
+        for kb in keys:
+            bn = os.path.basename(str(kb))
+            if not bn.lower().endswith(cfg_b.file_ext):
+                continue
+            base = bn[: -len(cfg_b.file_ext)]
+            parts = base.split("_")
+            if len(parts) < 4:
+                continue
+            date = parts[-2]
+            hhmmss = parts[-1]
+            try:
+                dt_b = datetime.strptime(f"{date}_{hhmmss}", "%Y%m%d_%H%M%S")
+            except:
+                continue
+            arr.append((dt_b, kb))
+        if arr:
+            arr.sort(key=lambda x: x[0])
+            dts = [x[0] for x in arr]
+            kbs = [x[1] for x in arr]
+        else:
+            dts, kbs = [], []
+        prefix_to_dt_keys[p] = (dts, kbs)
 
     # 3) A -> B 매칭
     match_map = {}
@@ -283,13 +317,46 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
             expected_range = f"{dt_lo:%Y%m%d_%H%M%S}~{dt_hi:%Y%m%d_%H%M%S}"
         except:
             pass
+
+        # (A) 빠른 경로: 예상 시간범위 내 후보 key를 만들어서 존재 여부 확인
         hit_key = None
         hit_off = None
         for kb, off in generate_bucket_b_candidate_keys(info, cfg_b.time_offset_range):
-            if kb in all_b_keys:
+            if kb in all_b_keys_set:
                 hit_key = kb
                 hit_off = int(off)
                 break
+
+        # (B) fallback: 같은 prefix(날짜/LOT+WAFER)로 list된 것 중 시간 가장 가까운 key 선택 (범위 밖도 허용)
+        fallback_key = None
+        fallback_diff = None
+        if not hit_key:
+            try:
+                dt_a = datetime.strptime(f"{info['date']}_{info['time']}", "%Y%m%d_%H%M%S")
+            except:
+                dt_a = None
+            if dt_a is not None:
+                best = None
+                best_key = None
+                best_diff = None
+                prefixes_a = list(generate_bucket_b_prefixes(info, cfg_b.time_offset_range))
+                for pfx in prefixes_a:
+                    dts, kbs = prefix_to_dt_keys.get(pfx, ([], []))
+                    if not dts:
+                        continue
+                    i = bisect_left(dts, dt_a)
+                    for j in (i-1, i):
+                        if 0 <= j < len(dts):
+                            diff = int(round((dts[j] - dt_a).total_seconds()))
+                            score = (abs(diff), 0 if diff >= 0 else 1)
+                            if best is None or score < best:
+                                best = score
+                                best_key = kbs[j]
+                                best_diff = diff
+                fallback_key = best_key
+                fallback_diff = best_diff
+
+        # 최종 결정
         if hit_key:
             matched += 1
             match_map[ka] = {
@@ -302,6 +369,23 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
                 "time_offset_range": [lo, hi],
                 "expected_key0": expected_key0,
                 "expected_range": expected_range,
+                "reason": "predicted_hit",
+                "first_line": "",
+                "first_line_ok": False,
+            }
+        elif fallback_key:
+            matched += 1
+            match_map[ka] = {
+                "matched": True,
+                "bucket": cfg_b.bucket_name,
+                "method": "prefix_list",
+                "a_key": ka,
+                "key": fallback_key,
+                "offset_sec": int(fallback_diff) if fallback_diff is not None else 0,
+                "time_offset_range": [lo, hi],
+                "expected_key0": expected_key0,
+                "expected_range": expected_range,
+                "reason": "nearest_fallback",
                 "first_line": "",
                 "first_line_ok": False,
             }
@@ -314,6 +398,7 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
                 "time_offset_range": [lo, hi],
                 "expected_key0": expected_key0,
                 "expected_range": expected_range,
+                "reason": "no_keys_found",
             }
 
     # 4) first line read (matched only)
@@ -337,7 +422,7 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
     read_part = (f" read_ok={firstline_ok}/{matched}" if matched else " read_ok=0")
     print(
         f"[bucketB(prefix-list){lbl}] match성공={matched}/{len(part_keys_a)}"
-        f"{read_part} parse_failed={parse_failed} prefixes={len(prefixes)} listed_keys={len(all_b_keys)}"
+        f"{read_part} parse_failed={parse_failed} prefixes={len(prefixes)} listed_keys={all_listed}"
         f" in {time.time()-t0:.2f}s"
     )
     return match_map
