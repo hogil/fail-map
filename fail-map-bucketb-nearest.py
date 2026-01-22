@@ -1371,7 +1371,14 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
                 results[k]["dataset_size"] += n
                 results[k]["image_count"]  += img_ok_by_key.get((tok, p1, p2), 0)
 
-            print(f"  -> chunk done in {round(time.time()-t_chunk, 2)}s")
+            # chunk 종료 시 bucketB 매칭 성공/실패 요약 출력
+            if bucket_b_match_map:
+                _succ = sum(1 for v in bucket_b_match_map.values() if v.get("matched"))
+                _fail = len(bucket_b_match_map) - _succ
+                _read_ok = sum(1 for v in bucket_b_match_map.values() if v.get("matched") and v.get("first_line_ok"))
+                print(f"  -> chunk done in {round(time.time()-t_chunk, 2)}s  [bucketB] 성공={_succ} 실패={_fail} read_ok={_read_ok}/{_succ if _succ else 0}")
+            else:
+                print(f"  -> chunk done in {round(time.time()-t_chunk, 2)}s  [bucketB] disabled_or_empty")
 
         total_secs = round(time.time()-t0, 2)
 
