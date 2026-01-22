@@ -142,6 +142,10 @@ python fail-map-bucketb-head.py
 python fail-map-bucketb-nearest.py
 ```
 
+### Bucket B 매칭 + positions JSON 기록 (같은 LOT+WAFER에서 가장 가까운 시간, 시간 제한 없음)
+```bash
+python fail-map-bucketb-closest.py
+```
 ## Configuration
 
 ### Bucket B 설정
@@ -225,7 +229,8 @@ pip install unlzw3 py7zr  # 압축 해제
 1. **기본 추천**: `fail-map-bucketb-prefixlist.py` (S3 list 최소화 + 빠름)
 2. **list 호출이 부담**: `fail-map-bucketb-head.py` (list 없이 HEAD로 찌름)
 3. **여러 후보 중 가장 가까운 시간 선택**: `fail-map-bucketb-nearest.py`
-4. **Bucket B 데이터까지 실제로 파싱/병합**: `fail-map-dual-bucket.py`
+4. **시간차가 종종 ±범위를 벗어남**: `fail-map-bucketb-closest.py` (가장 가까운 시간으로 항상 1개 선택)
+5. **Bucket B 데이터까지 실제로 파싱/병합**: `fail-map-dual-bucket.py`
 
 ## How It Works
 
