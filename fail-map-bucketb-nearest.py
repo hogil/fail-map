@@ -1316,7 +1316,7 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
         window_end_s = end_ts.strftime("%Y-%m-%d %H:%M:%S")
         if s3b:
             mismatch_out_path = os.path.join(
-                os.getcwd(),
+                str(Path(__file__).resolve().parent),
                 f"bucketb_mismatch_{Path(__file__).stem}_{datetime.now():%Y%m%d_%H%M%S}.txt",
             )
             with open(mismatch_out_path, "w", encoding="utf-8", newline="\n") as f:
