@@ -210,7 +210,7 @@ class S3ManagerB:
         except:
             return ""
 
-def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: BucketBConfig):
+def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: BucketBConfig, chunk_label: str = ""):
     """
     returns: dict[a_key] -> match_meta
     """
@@ -293,7 +293,15 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
                 meta["first_line"] = line
                 meta["first_line_ok"] = bool(line)
 
-    print(f"[bucketB(prefix-list)] matched={matched}/{len(part_keys_a)}  prefixes={len(prefixes)}  listed_keys={len(all_b_keys)}  in {time.time()-t0:.2f}s")
+    parse_failed = sum(1 for m in match_map.values() if m.get("reason") == "parse_failed")
+    firstline_ok = sum(1 for m in match_map.values() if m.get("matched") and m.get("first_line_ok"))
+    lbl = f" {chunk_label}" if chunk_label else ""
+    read_part = (f" read_ok={firstline_ok}/{matched}" if matched else " read_ok=0")
+    print(
+        f"[bucketB(prefix-list){lbl}] match성공={matched}/{len(part_keys_a)}"
+        f"{read_part} parse_failed={parse_failed} prefixes={len(prefixes)} listed_keys={len(all_b_keys)}"
+        f" in {time.time()-t0:.2f}s"
+    )
     return match_map
 
 # =================== Env / Cython(import-only) ===================
@@ -1273,7 +1281,7 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
             # Bucket B 매칭(먼저): A key -> bucket_b_match meta
             bucket_b_match_map = {}
             if s3b:
-                bucket_b_match_map = build_bucket_b_match_map_prefixlist(part_keys, s3b, CFG_B)
+                bucket_b_match_map = build_bucket_b_match_map_prefixlist(part_keys, s3b, CFG_B, chunk_label=f"{idx}/{total_chunks}")
 
             contents = s3.download_and_decompress_parallel(part_keys)
             if not contents:
