@@ -140,23 +140,39 @@ def generate_bucket_b_candidate_keys(info: dict, offset_range=(-10, 10)):
     dt0 = datetime.strptime(f"{info['date']}_{info['time']}", "%Y%m%d_%H%M%S")
     for off in iter_offsets_by_closeness(offset_range):
         dt = dt0 + timedelta(seconds=int(off))
-        folder = info.get("folder") or dt.strftime("%Y%m%d")
+        folder_a = info.get("folder") or dt.strftime("%Y%m%d")
         day = dt.strftime("%Y%m%d")
         hhmmss = dt.strftime("%H%M%S")
-        # Bucket B는 "동일 폴더(YYYYMMDD/)" 아래에 존재한다고 가정 (내부 date는 변경될 수 있음)
-        key_b = f"{folder}/{info['lot_id']}_{info['wafer_w']}_{day}_{hhmmss}{CFG_B.file_ext}"
-        yield key_b, int(off)
+        # 기본: A 폴더(대부분 케이스). 단, 자정 넘김으로 dt의 날짜가 바뀌면 dt 날짜 폴더도 함께 시도
+        key_b1 = f"{folder_a}/{info['lot_id']}_{info['wafer_w']}_{day}_{hhmmss}{CFG_B.file_ext}"
+        yield key_b1, int(off)
+        folder_dt = day
+        if folder_dt != folder_a:
+            key_b2 = f"{folder_dt}/{info['lot_id']}_{info['wafer_w']}_{day}_{hhmmss}{CFG_B.file_ext}"
+            yield key_b2, int(off)
 
 def generate_bucket_b_prefixes(info: dict, offset_range=(-10, 10)):
     """
     list_objects_v2 를 아주 좁은 prefix로 호출하기 위한 prefix 생성.
     - 자정 넘김을 고려해 offset 시작/끝으로 day 2개까지 생성
     """
-    folder = info.get("folder") or info.get("date")
-    if not folder:
+    folder_a = info.get("folder") or info.get("date")
+    if not folder_a:
         return
+    days = {str(folder_a)}
+    # 자정 넘김 대응: dt0+lo/hi에서 날짜가 바뀌면 그 날짜 폴더도 list 대상으로 포함
+    try:
+        dt0 = datetime.strptime(f"{info['date']}_{info['time']}", "%Y%m%d_%H%M%S")
+        lo, hi = int(offset_range[0]), int(offset_range[1])
+        if hi < lo:
+            lo, hi = hi, lo
+        days.add((dt0 + timedelta(seconds=lo)).strftime("%Y%m%d"))
+        days.add((dt0 + timedelta(seconds=hi)).strftime("%Y%m%d"))
+    except:
+        pass
     # 내부 date(YYYYMMDD)는 자정 넘어가면 변할 수 있으므로 prefix는 lot+wafer까지만 사용
-    yield f"{folder}/{info['lot_id']}_{info['wafer_w']}_"
+    for d in sorted(days):
+        yield f"{d}/{info['lot_id']}_{info['wafer_w']}_"
 
 def _decode_best_effort(b: bytes) -> str:
     for enc in ("utf-8", "cp949", "euc-kr", "latin1"):
@@ -1247,6 +1263,8 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
 
     t0 = time.time()
     results = {}
+    bucketb_mismatched_keys = set()
+    mismatch_out_path = None
     try:
         folders = s3.get_top_level_folders()
         print(f"[folders] total={len(folders)}")
@@ -1339,6 +1357,10 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
 
             # chunk 종료 시 bucketB 매칭 성공/실패 요약 출력
             if bucket_b_match_map:
+                # mismatch key 누적 (원본 A key만 저장)
+                for _ka, _meta in bucket_b_match_map.items():
+                    if not (_meta or {}).get("matched"):
+                        bucketb_mismatched_keys.add(_ka)
                 _succ = sum(1 for v in bucket_b_match_map.values() if v.get("matched"))
                 _fail = len(bucket_b_match_map) - _succ
                 _read_ok = sum(1 for v in bucket_b_match_map.values() if v.get("matched") and v.get("first_line_ok"))
@@ -1357,6 +1379,17 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
         removed = _cleanup_empty_p2_and_dates(CFG.base_root, p1_set)
         if removed:
             print(f"[cleanup] removed {removed} empty dirs")
+
+        # mismatch 리스트 저장 (실행 폴더)
+        if s3b:
+            mismatch_out_path = os.path.join(
+                os.getcwd(),
+                f"bucketb_mismatch_{Path(__file__).stem}_{datetime.now():%Y%m%d_%H%M%S}.txt",
+            )
+            with open(mismatch_out_path, "w", encoding="utf-8", newline="\n") as f:
+                for k in sorted(bucketb_mismatched_keys):
+                    f.write(str(k) + "\n")
+            print(f"[bucketB] mismatch_keys={len(bucketb_mismatched_keys)} saved={mismatch_out_path}")
 
         print(f"\n✅ Global done in {total_secs}s")
         print("\n🎯 Results by (prefix, token, p1, p2)")
