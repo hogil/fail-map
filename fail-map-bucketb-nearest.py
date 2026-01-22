@@ -1311,6 +1311,18 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
         selected = select_folders_by_window(folders, start_ts, end_ts)
         print(f"[folders] selected={selected}")
 
+        # bucketB mismatch log: chunk마다 append (실행 폴더에 1개 파일로 계속 저장)
+        window_start_s = start_ts.strftime("%Y-%m-%d %H:%M:%S")
+        window_end_s = end_ts.strftime("%Y-%m-%d %H:%M:%S")
+        if s3b:
+            mismatch_out_path = os.path.join(
+                os.getcwd(),
+                f"bucketb_mismatch_{Path(__file__).stem}_{datetime.now():%Y%m%d_%H%M%S}.txt",
+            )
+            with open(mismatch_out_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write("window_start\twindow_end\tchunk_idx\tchunk_total\tchunk_keys\tchunk_fail\ta_key\treason\n")
+            print(f"[bucketB] mismatch_log={mismatch_out_path}")
+
         # 1차 필터: 파일명(basename)에서 token+시간 뽑아 시간창으로 key 선정
         key_to_token, pf_stats = s3.prefilter_keys_by_filename(
             selected, token2pps, CFG.folder_filter_middle, start_ts, end_ts,
@@ -1393,11 +1405,6 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
 
             # chunk 종료 시 bucketB 매칭 성공/실패 요약 출력
             if bucket_b_match_map:
-                # mismatch key 누적 (원본 A key만 저장)
-                for _ka, _meta in bucket_b_match_map.items():
-                    if not (_meta or {}).get("matched"):
-                        bucketb_mismatched_keys.add(_ka)
-
                 _succ = sum(1 for v in bucket_b_match_map.values() if v.get("matched"))
                 _fail = len(bucket_b_match_map) - _succ
                 _read_ok = sum(1 for v in bucket_b_match_map.values() if v.get("matched") and v.get("first_line_ok"))
@@ -1419,6 +1426,23 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
                         if chunk_pos is None or _off > chunk_pos[0]:
                             chunk_pos = (_off, _ka, _bk)
 
+                # mismatch: chunk마다 파일에 append 저장 (원본 A key만)
+                mismatch_this = []
+                for _ka, _meta in bucket_b_match_map.items():
+                    if not (_meta or {}).get("matched"):
+                        mismatch_this.append(_ka)
+                        bucketb_mismatched_keys.add(_ka)
+                if mismatch_out_path and mismatch_this:
+                    lines = []
+                    for _ka in mismatch_this:
+                        _meta = bucket_b_match_map.get(_ka) or {}
+                        _reason = _meta.get("reason") or "not_found"
+                        lines.append(
+                            f"{window_start_s}\t{window_end_s}\t{idx}\t{total_chunks}\t{len(part_keys)}\t{_fail}\t{_ka}\t{_reason}\n"
+                        )
+                    with open(mismatch_out_path, "a", encoding="utf-8", newline="\n") as f:
+                        f.write("".join(lines))
+
                 # global 갱신
                 if chunk_neg is not None and (bucketb_global_neg is None or chunk_neg[0] < bucketb_global_neg[0]):
                     bucketb_global_neg = chunk_neg
@@ -1435,6 +1459,7 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
                 print(
                     f"  -> chunk done in {round(time.time()-t_chunk, 2)}s  [bucketB] 성공={_succ} 실패={_fail} read_ok={_read_ok}/{_succ if _succ else 0}  "
                     f"neg_max={neg_s}  pos_max={pos_s}"
+                    + (f"  mismatch_append={len(mismatch_this)} total_saved={len(bucketb_mismatched_keys)}" if mismatch_out_path else "")
                 )
             else:
                 print(f"  -> chunk done in {round(time.time()-t_chunk, 2)}s  [bucketB] disabled_or_empty")
@@ -1451,16 +1476,8 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
         if removed:
             print(f"[cleanup] removed {removed} empty dirs")
 
-        # mismatch 리스트 저장 (실행 폴더)
-        if s3b:
-            mismatch_out_path = os.path.join(
-                os.getcwd(),
-                f"bucketb_mismatch_{Path(__file__).stem}_{datetime.now():%Y%m%d_%H%M%S}.txt",
-            )
-            with open(mismatch_out_path, "w", encoding="utf-8", newline="\n") as f:
-                for k in sorted(bucketb_mismatched_keys):
-                    f.write(str(k) + "\n")
-
+        # mismatch 파일은 chunk마다 append 저장되며, 여기서는 최종 요약만 출력
+        if s3b and mismatch_out_path:
             # 최종 offset 극값 출력
             gneg_s = "None"
             gpos_s = "None"
@@ -1469,7 +1486,7 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
             if bucketb_global_pos is not None:
                 gpos_s = f"+{bucketb_global_pos[0]} (A={bucketb_global_pos[1]} B={bucketb_global_pos[2]})"
             print(f"[bucketB] overall neg_max={gneg_s}  pos_max={gpos_s}")
-            print(f"[bucketB] mismatch_keys={len(bucketb_mismatched_keys)} saved={mismatch_out_path}")
+            print(f"[bucketB] mismatch_keys_total={len(bucketb_mismatched_keys)} saved={mismatch_out_path}")
 
         print(f"\n✅ Global done in {total_secs}s")
         print("\n🎯 Results by (prefix, token, p1, p2)")
