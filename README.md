@@ -233,6 +233,26 @@ pip install unlzw3 py7zr  # 압축 해제
 4. **시간차가 종종 ±범위를 벗어남(제한 없음)**: `fail-map-bucketb-closest.py`
 5. **Bucket B 데이터까지 실제로 파싱/병합**: `fail-map-dual-bucket.py`
 
+## Bucket B 매칭 방식(스크립트별)
+
+- **`fail-map-bucketb-prefixlist.py` (예측+membership)**
+  - Bucket B를 `YYYYMMDD/LOT_Wxx_` **좁은 prefix로만 list**
+  - A 시간 기준으로 **±range 후보 파일명을 생성(0,+1,-1,+2,-2...)** → list 결과 set에 **존재하는지 membership 체크**
+  - 후보가 여러 개면 **가까운 오프셋 우선**으로 1개 선택
+
+- **`fail-map-bucketb-prefixlist-fallback.py` (예측 → 없으면 closest)**
+  - 위 prefixlist와 동일하게 **먼저 예측 후보로 빠르게 찾고**
+  - 실패 시, 같은 `LOT+WAFER` prefix로 list된 파일들 중 **시간이 가장 가까운 1개를 선택** (시간차 제한 없음)
+
+- **`fail-map-bucketb-nearest.py` (list 후 closest, ±range 제한)**
+  - `LOT+WAFER` prefix로 list 후, 그 중에서 **±range 안에서만** 가장 가까운 시간 1개 선택
+
+- **`fail-map-bucketb-closest.py` (list 후 closest, 제한 없음)**
+  - `LOT+WAFER` prefix로 list 후, **범위 제한 없이** 가장 가까운 시간 1개 선택
+
+공통:
+- 매칭 성공 시 Bucket B `.gz`는 `gzip.GzipFile(...).readline()`로 **첫 줄만 스트리밍으로 읽어서** positions JSON에 기록
+
 ## How It Works
 
 ### 기존 방식 (느림)
