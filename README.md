@@ -70,23 +70,15 @@
 |------|----------------------|-----------|
 | 순차 처리 (naive) | 100% (기준) | 낮음 |
 | **dual-bucket.py** | **~60%** ⭐ | 중간 |
-| speed-first.py | **~50%** | 높음 |
-| memory-efficient.py | ~75% | 낮음 |
+| (삭제됨) optimized scripts | - | - |
 
 ### 최적화 전략
 
 #### Speed-First
-- 256 threads로 최대 병렬화
-- Bucket B 전체 사전 로드
-- 작은 chunk (150) → 빠른 응답
-- 메모리: ~4-8GB
+> (삭제됨) `optimized-speed-first.py` 는 저장소에서 제거되었습니다.
 
 #### Memory-Efficient
-- 64 threads로 적은 메모리
-- 순차 처리 + 스트리밍
-- 큰 chunk (600) → 적은 반복
-- 강제 GC
-- 메모리: ~1-2GB
+> (삭제됨) `optimized-memory-efficient.py` 는 저장소에서 제거되었습니다.
 
 ## Dual Bucket Matching Strategy
 
@@ -103,7 +95,7 @@ bucket_b_index.build_from_keys(all_keys_b)  # ~20초
 '20260111/token_00P_20260111_143025.Z' → ('token', '20260111', '143025')
 
 # -10~+10초 범위 생성
-'143025' → ['143025', '143026', ..., '143035']
+'143025' → ['143015', ..., '143025', ..., '143035']
 
 # 메모리 인덱스에서 검색 (< 0.1초)
 matched_keys = index.find_matches(bucket_a_keys)
@@ -135,14 +127,19 @@ python fail-map-claude.py
 python fail-map-dual-bucket.py
 ```
 
-### Dual Bucket (속도 최적화)
+### Bucket B 매칭 + positions JSON 기록 (fail-map.py 기반, 추천)
 ```bash
-python optimized-speed-first.py
+python fail-map-bucketb-prefixlist.py
 ```
 
-### Dual Bucket (메모리 최적화)
+### Bucket B 매칭 + positions JSON 기록 (list 없이 HEAD 방식)
 ```bash
-python optimized-memory-efficient.py
+python fail-map-bucketb-head.py
+```
+
+### Bucket B 매칭 + positions JSON 기록 (같은 폴더에서 시간 가장 가까운 파일)
+```bash
+python fail-map-bucketb-nearest.py
 ```
 
 ## Configuration
@@ -154,8 +151,8 @@ python optimized-memory-efficient.py
 class BucketBConfig:
     bucket_name: str = 'eds.m-eds-map-raw'
     enabled: bool = True
-    time_offset_range: tuple = (0, 10)  # 0~10초 범위
-    file_pattern: str = '.gz'  # Bucket B 파일 확장자
+    time_offset_range: tuple = (-10, 10)  # -10~+10초 범위
+    file_ext: str = '.gz'  # Bucket B 파일 확장자
 ```
 
 ### 성능 튜닝
@@ -204,15 +201,15 @@ Dual bucket 모드에서는 각 chip에 `bucket_b` 필드가 추가됩니다:
 Bucket B 파일은 특별한 명명 규칙을 가집니다:
 
 ```
-Bucket A: 01_ABC123-00P_N_20260121_025936.Z
+Bucket A: 01_3BC170H3-00P_N_20260122_022718.Z
           ↓ (자동 변환 + 시간 매칭)
-Bucket B: ABC123_W01_20260121_025938.gz  (+2초)
+Bucket B: 3BC170H3P_W01_20260122_022719.gz  (+1초)
 
 변환 규칙:
 1. 맨 앞 2글자 (01) → W01 (W 접두사 추가)
-2. LOT ID (ABC123) → 그대로 유지
-3. -00P_N → 제거
-4. 날짜/시간 → 유지 (0~10초 차이 허용)
+2. LOT ID (3BC170H3-00P) → 3BC170H3P (-00 제거 + 접미 1글자 결합)
+3. 중간 구분자 (_N_) → 제거
+4. 날짜/시간 → 유지 (±10초 차이 허용)
 5. 확장자 .Z → .gz
 ```
 
@@ -225,9 +222,10 @@ pip install unlzw3 py7zr  # 압축 해제
 
 ## Performance Tips
 
-1. **많은 파일 (10000+)**: `optimized-speed-first.py` 사용
-2. **제한된 메모리**: `optimized-memory-efficient.py` 사용
-3. **프로덕션**: `fail-map-dual-bucket.py` 사용 (안정성)
+1. **기본 추천**: `fail-map-bucketb-prefixlist.py` (S3 list 최소화 + 빠름)
+2. **list 호출이 부담**: `fail-map-bucketb-head.py` (list 없이 HEAD로 찌름)
+3. **여러 후보 중 가장 가까운 시간 선택**: `fail-map-bucketb-nearest.py`
+4. **Bucket B 데이터까지 실제로 파싱/병합**: `fail-map-dual-bucket.py`
 
 ## How It Works
 
