@@ -10,7 +10,7 @@
 - 폰트 캐시 / PNG 원자적 저장
 """
 
-import os, re, sys, subprocess, importlib, tempfile, multiprocessing
+import os, re, importlib, tempfile, multiprocessing
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -175,40 +175,14 @@ def setup_environment():
     print(f"[env] Threads={cores}")
 
 
-# =================== Cython auto-build ===================
-
-def _ensure_cython_built():
-    """cython_functions.pyx가 있으면 자동 빌드 (.so/.pyd 없을 때만)"""
-    src_dir = Path(__file__).resolve().parent
-    pyx = src_dir / "cython_functions.pyx"
-    if not pyx.exists():
-        return
-    # 이미 import 가능하면 빌드 불필요
-    try:
-        import cython_functions
-        return
-    except ImportError:
-        pass
-    print("[cython] cython_functions not found, building...")
-    setup_py = src_dir / "setup.py"
-    if not setup_py.exists():
-        return
-    subprocess.run(
-        [sys.executable, str(setup_py), "build_ext", "--inplace"],
-        cwd=str(src_dir),
-        check=True,
-    )
-    importlib.invalidate_caches()
-    print("[cython] build done")
-
+# =================== Cython ===================
 
 _CYTHON_FN = None
 
 def get_cython_convert_hex():
-    """worker에서 cython 함수 1회 import 캐시 (필요 시 자동 빌드)"""
+    """worker에서 cython 함수 1회 import 캐시"""
     global _CYTHON_FN
     if _CYTHON_FN is None:
-        _ensure_cython_built()
         importlib.invalidate_caches()
         import cython_functions
         _CYTHON_FN = cython_functions.convert_hex_values_cython
