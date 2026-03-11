@@ -37,6 +37,7 @@ from utils import (
     hex_to_rgb, flatten_palette_by_keys,
     hval, parse_stime, parse_stime_dt,
     choose_pair_by_device, setup_environment,
+    get_cython_convert_hex,
     ttf_cached, save_indexed32_png,
 )
 from bucketb_module import CFG_B, S3ManagerB, build_bucket_b_match_map_prefixlist
@@ -81,18 +82,6 @@ class PipelineConfig:
 
 CFG = PipelineConfig()
 CFG.folder_filter_middles = {"00P": "-00P_", "00C": "-00C_"}
-
-# =================== Env / Cython(import-only) ===================
-
-_CYTHON_FN = None
-def get_cython_convert_hex():
-    """worker에서 cython 함수 1회 import 캐시"""
-    global _CYTHON_FN
-    if _CYTHON_FN is None:
-        importlib.invalidate_caches()
-        import cython_functions
-        _CYTHON_FN = cython_functions.convert_hex_values_cython
-    return _CYTHON_FN
 
 with open(CFG.color_json, 'r', encoding='utf-8') as f:
     _cd = json.load(f)
