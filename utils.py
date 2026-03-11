@@ -175,17 +175,41 @@ def setup_environment():
     print(f"[env] Threads={cores}")
 
 
-# =================== Cython ===================
+# =================== Cython (with pure-Python fallback) ===================
+
+_HEXMAP = {ord('0'): '0', ord('9'): '1',
+           ord('A'): '2', ord('a'): '2', ord('B'): '3', ord('b'): '3',
+           ord('C'): '4', ord('c'): '4', ord('D'): '5', ord('d'): '5',
+           ord('E'): '6', ord('e'): '6', ord('F'): '7', ord('f'): '7'}
+
+def _py_transform_line(line, xsize):
+    b = line.encode('ascii', 'ignore') if isinstance(line, str) else line
+    if len(b) < xsize * 2:
+        return ""
+    return "".join(_HEXMAP.get(b[1 + i * 2], '0') for i in range(xsize))
+
+def _py_convert_hex_values(lines, current_position, xsize, ysize):
+    if current_position >= len(lines):
+        return ""
+    parts = [_py_transform_line(lines[current_position][1:], xsize)]
+    for i in range(1, ysize):
+        if current_position + i < len(lines):
+            parts.append(_py_transform_line(lines[current_position + i][1:], xsize))
+    return ",".join(parts)
 
 _CYTHON_FN = None
 
 def get_cython_convert_hex():
-    """worker에서 cython 함수 1회 import 캐시"""
+    """worker에서 cython 함수 1회 import 캐시. .so 없으면 Python fallback."""
     global _CYTHON_FN
     if _CYTHON_FN is None:
-        importlib.invalidate_caches()
-        import cython_functions
-        _CYTHON_FN = cython_functions.convert_hex_values_cython
+        try:
+            importlib.invalidate_caches()
+            import cython_functions
+            _CYTHON_FN = cython_functions.convert_hex_values_cython
+        except ImportError:
+            print("[warn] cython_functions not found, using Python fallback (slower)")
+            _CYTHON_FN = _py_convert_hex_values
     return _CYTHON_FN
 
 
