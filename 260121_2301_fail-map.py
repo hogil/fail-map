@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Fail-bit map PNG + positions JSON generator (00P/00C dual pipeline)
+
+핵심 동작(요구사항 반영):
+1) 파일명 1차 필터: -00P_ 와 -00C_ 둘 다 잡음 (kind=00P/00C 구분)
+2) 팔레트 인덱스 순서(고정):
+   - Grade(=chip0~chip7)은 반드시 0~7 고정
+   - 그 다음 bg, text
+   - 그 다음 border(normal), border_inv(invalid)
+   - 그 다음 BIN 테두리들
+3) BIN 테두리 적용은 kind별 화이트리스트:
+   - 00P: 285/286/287/288/290/291 만 색 테두리 적용
+   - 00C: 300/385/386/388/389/390 만 색 테두리 적용
+4) PNG 저장 후 positions JSON도 항상 같이 생성/저장 (00P/00C 무관)
+   - JSON에 kind 포함
+   - grid_edges(xs/ys) + chips[].rect(픽셀 좌표)를 제공해 UI가 클릭/오버레이 정답으로 사용 가능
+"""
+
 import os, re, sys, time, json, io, zipfile, tempfile, shutil, gzip, tarfile, subprocess, importlib, multiprocessing
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -22,10 +40,11 @@ class PipelineConfig:
     aws_access_key_id: str = 'ho.choi-LakeS3-F6B0U6'            # 요청: 자동 치환 금지
     aws_secret_access_key: str = 'iYb7zYDVzitt4QVkUcR2'         # 요청: 자동 치환 금지
     endpoint_url: str = 'http://lakes3.dataplatform.samsungds.net:9020'
+
     max_pool_connections: int = 256
     download_threads: int = 128
     cpu_processes: int = min(multiprocessing.cpu_count(), 24)
-    chunk_size: int = 300
+    chunk_size: int = 10
 
     border_thickness: int = 1
     defect_border_thickness: int = 2
@@ -36,10 +55,12 @@ class PipelineConfig:
 
     palette_colors: int = 32
     color_json: str = "/appdata/appuser/l3tracker-main/logs/color-legends.json"
-    folder_filter_middle: str = "-00P_"
+
+    # ✅ 00P / 00C 파일명 middle 필터
+    folder_filter_middles: dict = None  # {"00P":"-00P_", "00C":"-00C_"}
 
     hours_back_start: int = 0
-    hours_back_end:   int = 2
+    hours_back_end:   int = 28
 
     df_path: str = "/appdata/appuser/project/device_info.txt"
     df_positions: tuple = (4, 3, 1)  # (token, prefix1, prefix2) 1-based
@@ -48,6 +69,7 @@ class PipelineConfig:
     positions_root: str = "/appdata/appuser/positions"
 
 CFG = PipelineConfig()
+CFG.folder_filter_middles = {"00P": "-00P_", "00C": "-00C_"}
 
 # =================== Env / Cython(import-only) ===================
 
@@ -58,10 +80,15 @@ def setup_environment():
         os.environ[k] = str(cores)
     print(f"[env] Threads={cores}")
 
+_CYTHON_FN = None
 def get_cython_convert_hex():
-    importlib.invalidate_caches()
-    import cython_functions
-    return cython_functions.convert_hex_values_cython
+    """worker에서 cython 함수 1회 import 캐시"""
+    global _CYTHON_FN
+    if _CYTHON_FN is None:
+        importlib.invalidate_caches()
+        import cython_functions
+        _CYTHON_FN = cython_functions.convert_hex_values_cython
+    return _CYTHON_FN
 
 # =================== Utils ===================
 
@@ -72,6 +99,9 @@ def _safe_prefix(*parts: str) -> str:
     return "/".join(re.sub(r"[^A-Za-z0-9._-]+", "", str(p)) for p in parts if str(p).strip())
 
 def select_folders_by_window(folders, a, b):
+    """
+    top-level 폴더명(YYMMDD 또는 YYYYMMDD)을 시간창(start_ts~end_ts)에 해당하는 날짜만 선택
+    """
     if b < a: a, b = b, a
     want = {(a + timedelta(days=i)).strftime("%y%m%d") for i in range((b.date()-a.date()).days+1)}
     want |= {w if len(w)==8 else "20"+w for w in want}  # YYMMDD -> 20YYMMDD
@@ -120,16 +150,20 @@ def _flatten_palette_by_keys(color_map, index_to_key, total_colors=32):
     if need > 0:
         rgb.extend([0] * need)
     elif need < 0:
-        raise ValueError("palette key overflow")
+        raise ValueError("palette key overflow (PALETTE_INDEX_TO_KEY > total_colors)")
     return rgb
 
 with open(CFG.color_json, 'r', encoding='utf-8') as f:
     _cd = json.load(f)
+
+# 사용할 set 선택 (default 고정)
 _d   = _cd['default']
 _top = _d['top']
 _btm = _d.get('bottom', {})
 
+# 색상 맵 (Grade + bg/text + border + BINs)
 PALETTE_HEX_MAP = {
+    # Grade
     "chip0": _top.get("Grade0", "#FFFFFF"),
     "chip1": _top.get("Grade1", "#9B9B9B"),
     "chip2": _top.get("Grade2", "#009619"),
@@ -138,36 +172,80 @@ PALETTE_HEX_MAP = {
     "chip5": _top.get("Grade5", "#FFFF00"),
     "chip6": _top.get("Grade6", "#FF0000"),
     "chip7": _top.get("Grade7", "#000000"),
-    "border":      _btm.get("border",  "#BEBEBE"),
-    "border_inv":  _btm.get("Invalid", "#FF9900"),
-    "border_b285": _btm.get("B285",    "#0099FF"),
-    "border_b286": _btm.get("B286",    "#FF714F"),
-    "border_b287": _btm.get("B287",    "#66FFCC"),
-    "border_b288": _btm.get("B288",    "#DA26CD"),
-    "bg":          _d.get("background", "#FEFEFE"),
-    "text":        _d.get("text", "#000001"),
+
+    # bg/text
+    "bg":   _d.get("background", "#FEFEFE"),
+    "text": _d.get("text", "#000001"),
+
+    # border
+    "border":     _btm.get("Normal",  "#BEBEBE"),
+    "border_inv": _btm.get("Invalid", "#FF9900"),
+
+    # 00P BIN
+    "border_b285": _btm.get("B285", "#0099FF"),
+    "border_b286": _btm.get("B286", "#FF714F"),
+    "border_b287": _btm.get("B287", "#66FFCC"),
+    "border_b288": _btm.get("B288", "#DA26CD"),
+    "border_b290": _btm.get("B290", "#FFD700"),
+    "border_b291": _btm.get("B291", "#32CD32"),
+
+    # 00C BIN
+    "border_b300": _btm.get("B300", "#AAAAAA"),
+    "border_b385": _btm.get("B385", "#00C8FF"),
+    "border_b386": _btm.get("B386", "#FF00C8"),
+    "border_b388": _btm.get("B388", "#00FF66"),
+    "border_b389": _btm.get("B389", "#FF6666"),
+    "border_b390": _btm.get("B390", "#6666FF"),
 }
 
+# ✅ 팔레트 인덱스 순서(요구사항):
+# Grade(0..7 고정) → bg/text → border(normal/invalid) → BIN들
 PALETTE_INDEX_TO_KEY = [
-    "chip0","chip1","chip2","chip3","chip4","chip5","chip6","chip7",   # 0..7
-    "border","border_inv","border_b285","border_b286","border_b287","border_b288",  # 8..13
-    "bg","text"  # 14..15
+    # 0..7 (절대 고정)
+    "chip0","chip1","chip2","chip3","chip4","chip5","chip6","chip7",
+
+    # bg/text
+    "bg","text",
+
+    # border
+    "border","border_inv",
+
+    # 00P BIN
+    "border_b285","border_b286","border_b287","border_b288","border_b290","border_b291",
+
+    # 00C BIN
+    "border_b300","border_b385","border_b386","border_b388","border_b389","border_b390",
 ]
+
 KEY_TO_INDEX = {k:i for i,k in enumerate(PALETTE_INDEX_TO_KEY)}
 
-IDX_INVALID_FILL = 31
-IDX_BG         = KEY_TO_INDEX["bg"]          # 14
-IDX_BORDER     = KEY_TO_INDEX["border"]      # 8
-IDX_BORDER_INV = KEY_TO_INDEX["border_inv"]  # 9
-IDX_TEXT       = KEY_TO_INDEX["text"]        # 15
-IDX_B_DEF = {
+# reserve
+IDX_INVALID_FILL = 31  # invalid fill은 팔레트 마지막(31)을 사용(흰색 등으로 지정)
+IDX_BG         = KEY_TO_INDEX["bg"]
+IDX_TEXT       = KEY_TO_INDEX["text"]
+IDX_BORDER     = KEY_TO_INDEX["border"]
+IDX_BORDER_INV = KEY_TO_INDEX["border_inv"]
+
+# ✅ kind별 BIN 테두리 적용(화이트리스트)
+IDX_B_DEF_00P = {
     "285": KEY_TO_INDEX["border_b285"],
     "286": KEY_TO_INDEX["border_b286"],
     "287": KEY_TO_INDEX["border_b287"],
     "288": KEY_TO_INDEX["border_b288"],
+    "290": KEY_TO_INDEX["border_b290"],
+    "291": KEY_TO_INDEX["border_b291"],
+}
+IDX_B_DEF_00C = {
+    "300": KEY_TO_INDEX["border_b300"],
+    "385": KEY_TO_INDEX["border_b385"],
+    "386": KEY_TO_INDEX["border_b386"],
+    "388": KEY_TO_INDEX["border_b388"],
+    "389": KEY_TO_INDEX["border_b389"],
+    "390": KEY_TO_INDEX["border_b390"],
 }
 
 PALETTE_32 = _flatten_palette_by_keys(PALETTE_HEX_MAP, PALETTE_INDEX_TO_KEY, 32)
+# invalid fill 색: 흰색
 PALETTE_32[IDX_INVALID_FILL*3:IDX_INVALID_FILL*3+3] = _hex_to_rgb("#FFFFFF")
 
 # =================== Header parsing helpers ===================
@@ -179,6 +257,10 @@ def _hval(lines, key, max_lines=200):
     return ""
 
 def _parse_stime(lines):
+    """
+    규칙: 압축 해제 후 10번째 줄(0-index 9)에 :STIME=YYYY/MM/DD HH:MM:SS가 있으면
+    YYYYMMDD_HHMMSS로 정규화
+    """
     stime = "NA"
     if len(lines) > 9 and lines[9].startswith(':STIME='):
         raw = lines[9].split('=', 1)[1].strip()
@@ -210,6 +292,9 @@ def choose_pair_by_device(token, device_value, token2pps):
 # =================== Parsing ===================
 
 def find_initial_values_from_lines(lines, file_name):
+    """
+    파일 포맷에서 x/y size, 데이터 시작 라인 등을 찾아 타일 크기를 결정
+    """
     wfid = lines[1].split('=')[1].strip()
     base = os.path.basename((file_name or "").split("::")[-1])
     root = (base.split('-', 1)[0] if '-' in base else base).upper()
@@ -235,6 +320,7 @@ def find_initial_values_from_lines(lines, file_name):
     if start is None:
         raise ValueError("X= start not found")
 
+    # 일부 포맷 대응(축 swap 등)
     for i in range(start, min(start+10, len(lines))):
         if lines[i].startswith('#'):
             if i + xsize < len(lines) and lines[i+xsize].startswith('X='):
@@ -251,6 +337,10 @@ def find_initial_values_from_lines(lines, file_name):
     return xsize, ysize, start, root, step, wafer, rot
 
 def process_file_content(args):
+    """
+    워커에서 실행: 텍스트 1개를 파싱해 chip sample list를 반환.
+    kind(00P/00C)는 여기서 결정하지 않고, 상위에서 tagged로 붙인다.
+    """
     file_name, file_content = args
     if not file_content:
         return []
@@ -258,7 +348,6 @@ def process_file_content(args):
     if not lines:
         return []
 
-    # header values
     stime  = _parse_stime(lines)
     partid = _hval(lines, ":PARTID=")
     tester = _hval(lines, ":TESTER=")
@@ -298,6 +387,7 @@ def process_file_content(args):
             try:
                 hex_block = convert_hex_values(lines, j, xsize, ysize)
             except:
+                # cython 예외(파이썬)는 여기서 빈 블록 처리
                 hex_block = ""
 
         last_by_xy[(cx, cy)] = {
@@ -332,6 +422,10 @@ def _ttf_cached(w, h, text):
     return f
 
 def map_tile_after_rotation(i0, j0, rot_code, tilesW_after, tilesH_after):
+    """
+    타일 좌표(i0,j0)를 회전 후 좌표(i,j)로 매핑
+    rot_code: 7=90CCW, 3=270CCW, 0=180, else=none
+    """
     if rot_code == 7:   # 90 CCW
         return (j0, tilesH_after - 1 - i0)
     elif rot_code == 3: # 270 CCW
@@ -348,6 +442,7 @@ def centerize_row(j, H):
     return j - (H//2)
 
 def _save_indexed32_png(img, path):
+    """원자적 저장: tmp 파일에 저장 후 os.replace"""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".tmp_", dir=str(p.parent))
@@ -365,17 +460,25 @@ def _save_indexed32_png(img, path):
             pass
 
 def create_sample_image_func(args):
+    """
+    워커에서 실행:
+    1) samples(칩들)로 팔레트 인덱스 PNG 생성
+    2) PNG 저장
+    3) positions JSON 저장 (00P/00C 상관없이 항상)
+    """
     (samples, output_path, border_thin, rot, default_tile_size,
      draw_empty_text, empty_text_field, defect_border_thickness, positions_root) = args
 
     if not samples:
         return None
 
+    # --- 타일 그리드 크기 ---
     xs = [s['x'] for s in samples]; ys = [s['y'] for s in samples]
     x_min, x_max, y_min, y_max = min(xs), max(xs), min(ys), max(ys)
     tiles_w = x_max - x_min + 1
     tiles_h = y_max - y_min + 1
 
+    # --- 타일 내부 픽셀 크기(sh,sw) 추정 ---
     first_valid = next((s for s in samples if s.get('transformed_values')), None)
     if first_valid and first_valid.get('transformed_values'):
         sr = first_valid['transformed_values'].split(',')
@@ -385,8 +488,9 @@ def create_sample_image_func(args):
     else:
         sh, sw = default_tile_size
 
+    # --- 원본 캔버스(회전 전) ---
     H0, W0 = tiles_h * sh, tiles_w * sw
-    idx0 = np.full((H0, W0), IDX_BG, dtype=np.uint8)
+    idx0 = np.full((H0, W0), IDX_BG, dtype=np.uint8)  # 배경 인덱스로 초기화
 
     vmap, bmap, have = {}, {}, set()
 
@@ -395,6 +499,7 @@ def create_sample_image_func(args):
         rows = rs.split(',') if rs else []
         return (len(rows) == sh) and (sh > 0) and all(len(r) == sw for r in rows)
 
+    # --- 타일 채움(Grade 0..7 고정) / invalid fill ---
     for s in samples:
         i, j = s['x'] - x_min, s['y'] - y_min
         have.add((i, j))
@@ -405,11 +510,13 @@ def create_sample_image_func(args):
         x0, x1 = i * sw, (i + 1) * sw
         if ok:
             rows = (s.get('transformed_values') or "").split(',')
+            # '0'..'7' -> 0..7 (팔레트 인덱스)
             vals = np.frombuffer(''.join(rows).encode('ascii'), dtype=np.uint8) - ord('0')
             idx0[y0:y1, x0:x1] = vals.reshape(sh, sw)
         else:
             idx0[y0:y1, x0:x1] = IDX_INVALID_FILL
 
+    # --- 회전 ---
     rot_code = int(rot) if rot is not None else 5
     if rot_code == 7:
         idxR = np.transpose(idx0, (1, 0))[::-1, :]
@@ -425,9 +532,11 @@ def create_sample_image_func(args):
         tilesW_after, tilesH_after = tiles_w, tiles_h
     del idx0
 
+    # --- 팔레트 이미지 생성 ---
     imgP = Image.fromarray(idxR, mode='P')
     imgP.putpalette(PALETTE_32)
 
+    # --- 정사각형 리사이즈(시각화/UI 편의) + 스케일 기록 ---
     wR, hR = imgP.size
     if wR == hR:
         imgS = imgP
@@ -445,9 +554,11 @@ def create_sample_image_func(args):
     arr = np.array(imgS, dtype=np.uint8, copy=True)
     arr.setflags(write=1)
 
+    # 타일 경계 픽셀(정사각 캔버스 기준)
     xs_pix = [int(round(k * W / tilesW_after)) for k in range(tilesW_after + 1)]
     ys_pix = [int(round(k * H / tilesH_after)) for k in range(tilesH_after + 1)]
 
+    # --- 기본 격자 테두리(border) ---
     b = int(max(1, border_thin))
     for (ii0, jj0) in have:
         ii, jj = map_tile_after_rotation(ii0, jj0, rot_code, tilesW_after, tilesH_after)
@@ -458,6 +569,7 @@ def create_sample_image_func(args):
         arr[y0:y1, x0:x0+b] = IDX_BORDER
         arr[y0:y1, x1-b:x1] = IDX_BORDER
 
+    # invalid 타일 내부는 invalid fill로 덮기(안전)
     for (ii0, jj0) in have:
         if vmap.get((ii0, jj0), False):
             continue
@@ -473,6 +585,12 @@ def create_sample_image_func(args):
     d = int(max(1, defect_border_thickness))
     TEXT_FILL_RATIO = 0.35
 
+    # ✅ kind별 BIN 테두리 세트 선택
+    meta0 = samples[0]
+    kind = str(meta0.get("kind", "00P")).upper()
+    IDX_B_DEF_LOCAL = IDX_B_DEF_00C if kind == "00C" else IDX_B_DEF_00P
+
+    # --- BIN/invalid 테두리 오버레이 + invalid 텍스트 ---
     for s in samples:
         x_abs = int(s['x']); y_abs = int(s['y'])
         ii0, jj0 = x_abs - x_min, y_abs - y_min
@@ -482,13 +600,19 @@ def create_sample_image_func(args):
 
         ok = vmap.get((ii0, jj0), False)
         bval = bmap.get((ii0, jj0), "")
-        mnum = re.search(r'(\d{3})', bval or "")
-        num_key = (mnum.group(1) if mnum else None)
+
+        # BIN 숫자 정규화: "0285" -> "285", "B285" -> "285", "BIN290" -> "290"
+        mnum = re.search(r'(\d+)', str(bval))
+        num_key = None
+        if mnum:
+            num_key = mnum.group(1)
+            num_key = num_key[-3:]
+            num_key = num_key.zfill(3)
 
         if not ok:
             cidx = IDX_BORDER_INV
-        elif num_key in IDX_B_DEF:
-            cidx = IDX_B_DEF[num_key]
+        elif num_key in IDX_B_DEF_LOCAL:
+            cidx = IDX_B_DEF_LOCAL[num_key]
         else:
             cidx = None
 
@@ -498,6 +622,7 @@ def create_sample_image_func(args):
             base_img.paste(cidx, (x0, y0, x0 + d, y1))
             base_img.paste(cidx, (x1 - d, y0, x1, y1))
 
+        # invalid 텍스트(예: 285 표시)
         if draw_empty_text and (not ok):
             rawb = str(s.get(empty_text_field) or s.get('b') or "").strip()
             if rawb:
@@ -513,10 +638,10 @@ def create_sample_image_func(args):
                 cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
                 draw.text((cx - tw // 2, cy - th // 2), rawb, fill=IDX_TEXT, font=font)
 
+    # --- PNG 저장 ---
     _save_indexed32_png(base_img, output_path)
 
-    # positions json
-    meta0 = samples[0]
+    # --- positions JSON 생성/저장 (00P/00C 상관없이 항상) ---
     p1 = meta0.get("p1","NA"); p2 = meta0.get("p2","NA")
     stime = str(meta0.get("stime",""))
     day = (stime.split('_')[0] if (stime and '_' in stime) else "NA")
@@ -533,10 +658,13 @@ def create_sample_image_func(args):
         x_abs = int(s['x']); y_abs = int(s['y'])
         i0 = x_abs - x_min; j0 = y_abs - y_min
         i, j = map_tile_after_rotation(i0, j0, rot_code, tiles_w_rot, tiles_h_rot)
+
         x_cal = centerize_col(i, tiles_w_rot)
         y_cal = centerize_row(j, tiles_h_rot)
+
         x0, x1 = xs_edges[i], xs_edges[i+1]
         y0, y1 = ys_edges[j], ys_edges[j+1]
+
         rawb = (str(s.get('b') or "").lstrip('0') or '0')
         chips_json.append({
             "x_abs": x_abs, "y_abs": y_abs, "b": rawb,
@@ -549,6 +677,7 @@ def create_sample_image_func(args):
 
     json_obj = {
         "image_path": output_path,
+        "kind": kind,
         "root": meta0.get("root",""),
         "step": meta0.get("step",""),
         "wafer": meta0.get("wafer",""),
@@ -631,28 +760,37 @@ class S3Manager:
                 all_meta.extend(files)
         return all_meta
 
-    def prefilter_keys_by_filename(self, folders, token2pps, middle, start_dt, end_dt):
+    def prefilter_keys_by_filename(self, folders, token2pps, middle_map, start_dt, end_dt):
+        """
+        ✅ 00P/00C 둘 다 파일명 필터 + kind까지 리턴
+        return:
+          key_to_info[key] = (token, kind)  kind in {"00P","00C"}
+        """
         all_meta = self.get_compressed_files_meta(folders, '.Z')
         keys = [k for k, _ in all_meta]
 
-        rx_map = {}
+        rx_map = {}  # (tok, kind) -> regex
         for tok in token2pps.keys():
-            pat = rf'^\d{{2}}_{re.escape(str(tok))}.*{re.escape(middle)}.*?(?P<d>\d{{8}})[_-]?(?P<t>\d{{6}})'
-            rx_map[str(tok)] = re.compile(pat)
+            for kind, middle in middle_map.items():
+                pat = rf'^\d{{2}}_{re.escape(str(tok))}.*{re.escape(middle)}.*?(?P<d>\d{{8}})[_-]?(?P<t>\d{{6}})'
+                rx_map[(str(tok), str(kind))] = re.compile(pat)
 
         stats = dict(scanned=len(keys), token_hit=0, time_hit=0, kept=0)
-        key_to_token = {}
+        key_to_info = {}
         window_on = (start_dt is not None and end_dt is not None and (start_dt != end_dt))
 
         for key in keys:
             bn = os.path.basename(key)
             hit_tok = None
+            hit_kind = None
             name_dt = None
-            for tok, rx in rx_map.items():
+
+            for (tok, kind), rx in rx_map.items():
                 m = rx.search(bn)
                 if not m:
                     continue
                 hit_tok = tok
+                hit_kind = kind
                 if window_on:
                     try:
                         name_dt = datetime.strptime(f"{m.group('d')}_{m.group('t')}", "%Y%m%d_%H%M%S")
@@ -671,10 +809,10 @@ class S3Manager:
                     continue
                 stats['time_hit'] += 1
 
-            key_to_token[key] = hit_tok
+            key_to_info[key] = (hit_tok, hit_kind)
             stats['kept'] += 1
 
-        return key_to_token, stats
+        return key_to_info, stats
 
     def download_and_decompress_parallel(self, keys):
         if not keys:
@@ -853,10 +991,12 @@ class DataProcessor:
     def close(self):
         self.executor.shutdown(wait=True)
 
+    # tagged_pairs: (tok, p1, p2, kind, name, text)
     def process_files_parallel_tagged(self, tagged_pairs):
         if not tagged_pairs:
             return []
-        file_contents = [(name, text) for _, _, _, name, text in tagged_pairs]
+        file_contents = [(name, text) for _, _, _, _, name, text in tagged_pairs]
+
         results = list(tqdm(self.executor.map(
             process_file_content, file_contents,
             chunksize=max(1, len(file_contents)//(self.cfg.cpu_processes*4) or 1)
@@ -864,11 +1004,12 @@ class DataProcessor:
 
         out = []
         for idx, fr in enumerate(results):
-            tok, p1, p2 = tagged_pairs[idx][0], tagged_pairs[idx][1], tagged_pairs[idx][2]
+            tok, p1, p2, kind = tagged_pairs[idx][0], tagged_pairs[idx][1], tagged_pairs[idx][2], tagged_pairs[idx][3]
             for r in fr:
                 r["token"] = tok
                 r["p1"] = p1
                 r["p2"] = p2
+                r["kind"] = kind  # ✅ 00P/00C
                 out.append(r)
         return out
 
@@ -883,17 +1024,22 @@ class ImageGenerator:
     def generate_images_mixed(self, dataset_all, base_root, positions_root):
         from collections import defaultdict, Counter
         groups = defaultdict(list)
+
+        # ✅ kind 포함해서 그룹 분리 (00P/00C 별도 이미지)
         for s in dataset_all:
-            key = (s.get('token','NA'), s.get('p1','NA'), s.get('p2','NA'),
-                   s.get('root',''), s.get('step',''), s.get('wafer',''), s.get('stime','NA'))
+            key = (
+                s.get('kind','NA'),
+                s.get('token','NA'), s.get('p1','NA'), s.get('p2','NA'),
+                s.get('root',''), s.get('step',''), s.get('wafer',''), s.get('stime','NA')
+            )
             groups[key].append(s)
 
         tasks, task_keys = [], []
-        for (tok, p1, p2, root, step, wafer, stime), samples in groups.items():
+        for (kind, tok, p1, p2, root, step, wafer, stime), samples in groups.items():
             if not samples:
                 continue
 
-            # rot majority
+            # rot majority vote
             rots = [int(x.get('rot',5) or 5) for x in samples]
             rot = Counter(rots).most_common(1)[0][0] if rots else 5
             for s in samples:
@@ -902,6 +1048,7 @@ class ImageGenerator:
             day = (stime.split('_')[0] if (stime and '_' in stime) else "NA")
             out_dir = os.path.join(base_root, _safe_prefix(p1), _safe_prefix(p2), day)
             os.makedirs(out_dir, exist_ok=True)
+
             wafer_for_name = wafer[1:] if str(wafer).startswith("W") else wafer
             out_path = os.path.join(
                 out_dir,
@@ -918,7 +1065,7 @@ class ImageGenerator:
                 self.cfg.defect_border_thickness,
                 positions_root
             ))
-            task_keys.append((tok, p1, p2))
+            task_keys.append((kind, tok, p1, p2))
 
         if not tasks:
             return [], {}
@@ -947,6 +1094,7 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
     if df is None or len(df) == 0:
         return {}
 
+    # token -> list[(p1,p2)]
     token2pps = {}
     for tok, p1, p2 in df[["_token","_p1","_p2"]].itertuples(index=False, name=None):
         token2pps.setdefault(str(tok), []).append((str(p1), str(p2)))
@@ -966,6 +1114,8 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
     print(f"🚀 Start {datetime.now():%Y-%m-%d %H:%M:%S}")
     print(f"[window(name)] {start_ts:%Y-%m-%d %H:%M:%S} ~ {end_ts:%Y-%m-%d %H:%M:%S}")
     print(f"[tokens] n={len(token2pps)}")
+    print(f"[middles] {CFG.folder_filter_middles}")
+    print(f"[palette] chip idx 0..7 = {[KEY_TO_INDEX[f'chip{i}'] for i in range(8)]}  bg={IDX_BG} text={IDX_TEXT} border={IDX_BORDER} inv={IDX_BORDER_INV}")
 
     t0 = time.time()
     results = {}
@@ -979,14 +1129,14 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
         selected = select_folders_by_window(folders, start_ts, end_ts)
         print(f"[folders] selected={selected}")
 
-        # 1차 필터: 파일명(basename)에서 token+시간 뽑아 시간창으로 key 선정
-        key_to_token, pf_stats = s3.prefilter_keys_by_filename(
-            selected, token2pps, CFG.folder_filter_middle, start_ts, end_ts,
+        # ✅ 1차 필터: 파일명에서 token + kind(00P/00C) + 시간
+        key_to_info, pf_stats = s3.prefilter_keys_by_filename(
+            selected, token2pps, CFG.folder_filter_middles, start_ts, end_ts,
         )
         print(f"[prefilter(filename)] scanned={pf_stats.get('scanned',0)}  token_hit={pf_stats.get('token_hit',0)}  "
               f"time_hit={pf_stats.get('time_hit',0)}  kept={pf_stats.get('kept',0)}")
 
-        matched_keys = list(key_to_token.keys())
+        matched_keys = list(key_to_info.keys())
         if not matched_keys:
             print("[prefilter] no keys; nothing to do.")
             return results
@@ -1005,22 +1155,23 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
                 print("  -> empty chunk")
                 continue
 
-            # token은 key_to_token에서, pair는 :DEVICE=로 결정
+            # token/kind는 key_to_info에서, p1/p2는 :DEVICE=로 결정
             tagged_pairs = []
             for name, text in contents:
                 orig_key = name.split("::", 1)[0]
-                tok = key_to_token.get(orig_key)
-                if tok is None:
+                info = key_to_info.get(orig_key)
+                if info is None:
                     continue
+                tok, kind = info  # "00P" or "00C"
                 lines = text.splitlines()
                 device_val = _hval(lines, ":DEVICE=", max_lines=200)
                 p1, p2 = choose_pair_by_device(tok, device_val, token2pps)
-                tagged_pairs.append((tok, p1, p2, name, text))
+                tagged_pairs.append((tok, p1, p2, kind, name, text))
             del contents
 
             dataset_all = proc.process_files_parallel_tagged(tagged_pairs)
 
-            # 2차 필터: 본문 STIME 기반 시간창 필터
+            # 2차 필터: 본문 STIME이 파싱된 데이터만 유지(현재 요구대로 dt 존재만 확인)
             before = len(dataset_all)
             if (h0 != 0 or h1 != 0):
                 kept = []
@@ -1035,22 +1186,26 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
                 print("  -> no dataset in window")
                 continue
 
-            imgs, img_ok_by_key = img.generate_images_mixed(dataset_all, base_root=CFG.base_root, positions_root=CFG.positions_root)
+            imgs, img_ok_by_key = img.generate_images_mixed(
+                dataset_all,
+                base_root=CFG.base_root,
+                positions_root=CFG.positions_root
+            )
 
-            # simple accumulate
-            from collections import Counter, defaultdict
-            ds_count_by_key = Counter((s.get('token','NA'), s.get('p1','NA'), s.get('p2','NA')) for s in dataset_all)
-            for (tok, p1, p2), n in ds_count_by_key.items():
-                k = (f"{p1}/{p2}", str(tok), p1, p2)
+            # accumulate 결과
+            from collections import Counter
+            ds_count_by_key = Counter((s.get('kind','NA'), s.get('token','NA'), s.get('p1','NA'), s.get('p2','NA')) for s in dataset_all)
+            for (kind, tok, p1, p2), n in ds_count_by_key.items():
+                k = (f"{p1}/{p2}", str(tok), p1, p2, kind)
                 results.setdefault(k, {"dataset_size": 0, "image_count": 0})
                 results[k]["dataset_size"] += n
-                results[k]["image_count"]  += img_ok_by_key.get((tok, p1, p2), 0)
+                results[k]["image_count"]  += img_ok_by_key.get((kind, tok, p1, p2), 0)
 
             print(f"  -> chunk done in {round(time.time()-t_chunk, 2)}s")
 
         total_secs = round(time.time()-t0, 2)
 
-        # cleanup 복구
+        # cleanup
         p1_set = set()
         for pairs in token2pps.values():
             for (p1, p2) in pairs:
@@ -1061,7 +1216,7 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
             print(f"[cleanup] removed {removed} empty dirs")
 
         print(f"\n✅ Global done in {total_secs}s")
-        print("\n🎯 Results by (prefix, token, p1, p2)")
+        print("\n🎯 Results by (prefix, token, p1, p2, kind)")
         for k, v in results.items():
             print(" ", k, "->", v)
 
@@ -1084,7 +1239,9 @@ if __name__ == "__main__":
         multiprocessing.set_start_method("spawn", force=True)
     except RuntimeError:
         pass
+
     setup_environment()
+
     df = load_df(CFG.df_path)
     if df is not None and len(df) > 0:
         run_pipeline_for_dataframe(df)
