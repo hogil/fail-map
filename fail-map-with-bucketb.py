@@ -72,7 +72,7 @@ class PipelineConfig:
     folder_filter_middles: dict = None  # {"00P":"-00P_", "00C":"-00C_"}
 
     hours_back_start: int = 0
-    hours_back_end:   int = 28
+    hours_back_end:   int = 2
 
     df_path: str = "/appdata/appuser/project/device_info.txt"
     df_positions: tuple = (4, 3, 1)  # (token, prefix1, prefix2) 1-based

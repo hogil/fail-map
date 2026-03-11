@@ -43,6 +43,8 @@ Thumbs.db
 /images/
 /positions/
 /test_output/
+/test_data/
+test_all.py
 device_info.txt
 
 # Cython (build artifacts only — .pyx is source)
