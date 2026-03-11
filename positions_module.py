@@ -115,15 +115,10 @@ def save_positions_json(
     if _bm is None:
         _bm = meta0.get("bucket_b_match")
     _b_key = ""
-    _b_first = ""
     _lt = ""
     if isinstance(_bm, dict) and _bm.get("matched"):
         _b_key = str(_bm.get("key") or "")
-        _b_first = str(_bm.get("first_line") or "")
-        # LT= 뒤 2글자 추출
-        lt_m = re.search(r'LT=(\S{2})', _b_first)
-        if lt_m:
-            _lt = lt_m.group(1)
+        _lt = str((_b_parsed or {}).get("lt") or "")
 
     json_obj = {
         "bucket_b_key": _b_key,
