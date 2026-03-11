@@ -29,9 +29,18 @@ import pandas as pd
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
+
+from utils import (
+    create_s3_client, decode_best_effort,
+    split_key_and_inner, safe_name, safe_prefix,
+    select_folders_by_window, cleanup_empty_p2_and_dates,
+    hex_to_rgb, flatten_palette_by_keys,
+    hval, parse_stime, parse_stime_dt,
+    choose_pair_by_device, setup_environment,
+    ttf_cached, save_indexed32_png,
+)
 from bucketb_module import CFG_B, S3ManagerB, build_bucket_b_match_map_prefixlist
-from positions_module import save_positions_json, map_tile_after_rotation, centerize_col, centerize_row
-from s3_utils import create_s3_client, decode_best_effort
+from positions_module import save_positions_json, map_tile_after_rotation
 
 # =================== Config ===================
 
@@ -75,13 +84,6 @@ CFG.folder_filter_middles = {"00P": "-00P_", "00C": "-00C_"}
 
 # =================== Env / Cython(import-only) ===================
 
-def setup_environment():
-    cores = multiprocessing.cpu_count()
-    for k in ("NUMEXPR_MAX_THREADS","NUMEXPR_NUM_THREADS","OMP_NUM_THREADS",
-              "OPENBLAS_NUM_THREADS","MKL_NUM_THREADS","VECLIB_MAXIMUM_THREADS"):
-        os.environ[k] = str(cores)
-    print(f"[env] Threads={cores}")
-
 _CYTHON_FN = None
 def get_cython_convert_hex():
     """worker에서 cython 함수 1회 import 캐시"""
@@ -91,73 +93,6 @@ def get_cython_convert_hex():
         import cython_functions
         _CYTHON_FN = cython_functions.convert_hex_values_cython
     return _CYTHON_FN
-
-# =================== Utils ===================
-
-def _split_key_and_inner(name: str):
-    s = str(name or "")
-    return s.split("::", 1)[0]
-
-def _safe_name(s: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "", (s or "NA").strip()) or "NA"
-
-def _safe_prefix(*parts: str) -> str:
-    return "/".join(re.sub(r"[^A-Za-z0-9._-]+", "", str(p)) for p in parts if str(p).strip())
-
-def select_folders_by_window(folders, a, b):
-    """
-    top-level 폴더명(YYMMDD 또는 YYYYMMDD)을 시간창(start_ts~end_ts)에 해당하는 날짜만 선택
-    """
-    if b < a: a, b = b, a
-    want = {(a + timedelta(days=i)).strftime("%y%m%d") for i in range((b.date()-a.date()).days+1)}
-    want |= {w if len(w)==8 else "20"+w for w in want}  # YYMMDD -> 20YYMMDD
-    return [f for f in folders if f.rstrip("/").split("/")[-1] in want]
-
-def _cleanup_empty_p2_and_dates(base_root: str, p1_set: set) -> int:
-    removed = 0
-    for p1 in sorted(p1_set):
-        p1_dir = os.path.join(base_root, _safe_prefix(p1))
-        if not os.path.isdir(p1_dir):
-            continue
-        for p2 in sorted(os.listdir(p1_dir)):
-            p2_dir = os.path.join(p1_dir, p2)
-            if not os.path.isdir(p2_dir):
-                continue
-            for day in sorted(os.listdir(p2_dir)):
-                day_dir = os.path.join(p2_dir, day)
-                if os.path.isdir(day_dir):
-                    try:
-                        if not os.listdir(day_dir):
-                            os.rmdir(day_dir)
-                            removed += 1
-                    except:
-                        pass
-            try:
-                if not os.listdir(p2_dir):
-                    os.rmdir(p2_dir)
-                    removed += 1
-            except:
-                pass
-    return removed
-
-# =================== Palette ===================
-
-def _hex_to_rgb(hex_code: str):
-    s = (hex_code or "").strip()
-    if not (s.startswith("#") and len(s) == 7):
-        return [0, 0, 0]
-    return [int(s[1:3],16), int(s[3:5],16), int(s[5:7],16)]
-
-def _flatten_palette_by_keys(color_map, index_to_key, total_colors=32):
-    rgb = []
-    for key in index_to_key:
-        rgb.extend(_hex_to_rgb(color_map.get(key, "#000000")))
-    need = total_colors * 3 - len(rgb)
-    if need > 0:
-        rgb.extend([0] * need)
-    elif need < 0:
-        raise ValueError("palette key overflow (PALETTE_INDEX_TO_KEY > total_colors)")
-    return rgb
 
 with open(CFG.color_json, 'r', encoding='utf-8') as f:
     _cd = json.load(f)
@@ -250,50 +185,9 @@ IDX_B_DEF_00C = {
     "390": KEY_TO_INDEX["border_b390"],
 }
 
-PALETTE_32 = _flatten_palette_by_keys(PALETTE_HEX_MAP, PALETTE_INDEX_TO_KEY, 32)
+PALETTE_32 = flatten_palette_by_keys(PALETTE_HEX_MAP, PALETTE_INDEX_TO_KEY, 32)
 # invalid fill 색: 흰색
-PALETTE_32[IDX_INVALID_FILL*3:IDX_INVALID_FILL*3+3] = _hex_to_rgb("#FFFFFF")
-
-# =================== Header parsing helpers ===================
-
-def _hval(lines, key, max_lines=200):
-    for ln in lines[:max_lines]:
-        if ln.startswith(key):
-            return ln.split("=",1)[1].strip()
-    return ""
-
-def _parse_stime(lines):
-    """
-    규칙: 압축 해제 후 10번째 줄(0-index 9)에 :STIME=YYYY/MM/DD HH:MM:SS가 있으면
-    YYYYMMDD_HHMMSS로 정규화
-    """
-    stime = "NA"
-    if len(lines) > 9 and lines[9].startswith(':STIME='):
-        raw = lines[9].split('=', 1)[1].strip()
-        m = re.match(r'(\d{4})/(\d{2})/(\d{2})\s+(\d{2}):(\d{2}):(\d{2})', raw)
-        stime = (f"{m.group(1)}{m.group(2)}{m.group(3)}_{m.group(4)}{m.group(5)}{m.group(6)}"
-                 if m else raw.replace('/', '').replace(':', '').replace(' ', '_'))
-    return stime
-
-def _parse_stime_dt(st):
-    if not st: return None
-    if not re.match(r'^(\d{8})_(\d{6})$', st): return None
-    try:
-        return datetime.strptime(st, "%Y%m%d_%H%M%S")
-    except:
-        return None
-
-# =================== Token→pair 결정 (DEVICE 기반, p1만) ===================
-
-def choose_pair_by_device(token, device_value, token2pps):
-    pairs = token2pps.get(str(token), [])
-    if not pairs:
-        return ("NA", "NA")
-    devU = (device_value or "").upper()
-    for (p1, p2) in pairs:
-        if p1 and (p1.upper() in devU):
-            return (p1, p2)
-    return ("NA", "NA")
+PALETTE_32[IDX_INVALID_FILL*3:IDX_INVALID_FILL*3+3] = hex_to_rgb("#FFFFFF")
 
 # =================== Parsing ===================
 
@@ -354,11 +248,11 @@ def process_file_content(args):
     if not lines:
         return []
 
-    stime  = _parse_stime(lines)
-    partid = _hval(lines, ":PARTID=")
-    tester = _hval(lines, ":TESTER=")
-    device = _hval(lines, ":DEVICE=")
-    pgm    = _hval(lines, ":PGM=")
+    stime  = parse_stime(lines)
+    partid = hval(lines, ":PARTID=")
+    tester = hval(lines, ":TESTER=")
+    device = hval(lines, ":DEVICE=")
+    pgm    = hval(lines, ":PGM=")
 
     try:
         xsize, ysize, start, root, step, wafer, rot = find_initial_values_from_lines(lines, file_name)
@@ -396,7 +290,7 @@ def process_file_content(args):
                 # cython 예외(파이썬)는 여기서 빈 블록 처리
                 hex_block = ""
 
-        orig_key = _split_key_and_inner(file_name)
+        orig_key = split_key_and_inner(file_name)
         last_by_xy[(cx, cy)] = {
             "root": root, "step": step, "wafer": wafer,
             "x": cx, "y": cy, "b": cb,
@@ -411,41 +305,6 @@ def process_file_content(args):
     return list(last_by_xy.values())
 
 # =================== Image generation ===================
-
-_FONT_CACHE = {}
-def _ttf_cached(w, h, text):
-    key = (w, h, len(text))
-    if key in _FONT_CACHE:
-        return _FONT_CACHE[key]
-    sz = max(8, min(w, h))
-    for name in ("DejaVuSans.ttf","Arial.ttf","LiberationSans-Regular.ttf"):
-        try:
-            f = ImageFont.truetype(name, sz)
-            _FONT_CACHE[key] = f
-            return f
-        except:
-            pass
-    f = ImageFont.load_default()
-    _FONT_CACHE[key] = f
-    return f
-
-def _save_indexed32_png(img, path):
-    """원자적 저장: tmp 파일에 저장 후 os.replace"""
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".tmp_", dir=str(p.parent))
-    os.close(fd)
-    try:
-        img.save(tmp, format="PNG", optimize=False, compress_level=1)
-        if not os.path.exists(tmp) or os.path.getsize(tmp) <= 0:
-            raise IOError("empty output")
-        os.replace(tmp, path)
-    finally:
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except:
-            pass
 
 def create_sample_image_func(args):
     """
@@ -617,7 +476,7 @@ def create_sample_image_func(args):
                 rawb = rawb[1:4] if len(rawb) >= 4 else rawb[-3:]
                 inner_w = max(1, int(round((x1 - x0) * TEXT_FILL_RATIO)))
                 inner_h = max(1, int(round((y1 - y0) * TEXT_FILL_RATIO)))
-                font = _ttf_cached(inner_w, inner_h, rawb)
+                font = ttf_cached(inner_w, inner_h, rawb)
                 try:
                     tw = int(draw.textlength(rawb, font=font))
                     th = font.size
@@ -627,7 +486,7 @@ def create_sample_image_func(args):
                 draw.text((cx - tw // 2, cy - th // 2), rawb, fill=IDX_TEXT, font=font)
 
     # --- PNG 저장 ---
-    _save_indexed32_png(base_img, output_path)
+    save_indexed32_png(base_img, output_path)
 
     # --- positions JSON 생성/저장 (positions_module) ---
     Ws, Hs = base_img.size
@@ -961,13 +820,13 @@ class ImageGenerator:
                 s["rot"] = rot
 
             day = (stime.split('_')[0] if (stime and '_' in stime) else "NA")
-            out_dir = os.path.join(base_root, _safe_prefix(p1), _safe_prefix(p2), day)
+            out_dir = os.path.join(base_root, safe_prefix(p1), safe_prefix(p2), day)
             os.makedirs(out_dir, exist_ok=True)
 
             wafer_for_name = wafer[1:] if str(wafer).startswith("W") else wafer
             out_path = os.path.join(
                 out_dir,
-                f"{_safe_name(root)}_{_safe_name(step)}_{_safe_name(wafer_for_name)}_{_safe_name(stime)}.png"
+                f"{safe_name(root)}_{safe_name(step)}_{safe_name(wafer_for_name)}_{safe_name(stime)}.png"
             )
 
             tasks.append((
@@ -1099,7 +958,7 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
                     continue
                 tok, kind = info  # "00P" or "00C"
                 lines = text.splitlines()
-                device_val = _hval(lines, ":DEVICE=", max_lines=200)
+                device_val = hval(lines, ":DEVICE=", max_lines=200)
                 p1, p2 = choose_pair_by_device(tok, device_val, token2pps)
                 tagged_pairs.append((tok, p1, p2, kind, name, text))
             del contents
@@ -1119,7 +978,7 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
             if (h0 != 0 or h1 != 0):
                 kept = []
                 for s in dataset_all:
-                    dt = _parse_stime_dt(s.get('stime'))
+                    dt = parse_stime_dt(s.get('stime'))
                     if dt is not None:
                         kept.append(s)
                 dataset_all = kept
@@ -1185,7 +1044,7 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
             for (p1, p2) in pairs:
                 if p1 and p1 != "NA":
                     p1_set.add(p1)
-        removed = _cleanup_empty_p2_and_dates(CFG.base_root, p1_set)
+        removed = cleanup_empty_p2_and_dates(CFG.base_root, p1_set)
         if removed:
             print(f"[cleanup] removed {removed} empty dirs")
 

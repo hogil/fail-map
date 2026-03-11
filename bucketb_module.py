@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
-from s3_utils import create_s3_client, decode_best_effort
+from utils import create_s3_client, decode_best_effort, split_key_and_inner
 
 
 # =================== Bucket B Config ===================
@@ -51,11 +51,6 @@ _RX_A_BASENAME = re.compile(
 )
 
 
-def _split_key_and_inner(name: str):
-    s = str(name or "")
-    return s.split("::", 1)[0]
-
-
 def parse_bucket_a_key(key: str):
     """
     예)
@@ -63,7 +58,7 @@ def parse_bucket_a_key(key: str):
     반환:
       dict or None
     """
-    k = _split_key_and_inner(key)
+    k = split_key_and_inner(key)
     parts = k.split("/", 1)
     if len(parts) != 2:
         return None

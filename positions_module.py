@@ -6,11 +6,9 @@ Positions JSON 생성 모듈
 - Bucket B match summary 포함
 """
 
-import os, re, json
+import os, json
 
-
-def _safe_prefix(*parts: str) -> str:
-    return "/".join(re.sub(r"[^A-Za-z0-9._-]+", "", str(p)) for p in parts if str(p).strip())
+from utils import safe_prefix
 
 
 def map_tile_after_rotation(i0, j0, rot_code, tilesW_after, tilesH_after):
@@ -131,7 +129,7 @@ def save_positions_json(
     if _bm is not None:
         json_obj["bucket_b_match"] = _bm
 
-    json_dir = os.path.join(positions_root, _safe_prefix(p1), _safe_prefix(p2), day)
+    json_dir = os.path.join(positions_root, safe_prefix(p1), safe_prefix(p2), day)
     os.makedirs(json_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(output_path))[0]
     json_path = os.path.join(json_dir, base_name + ".json")
