@@ -115,9 +115,11 @@ def save_positions_json(
     if _bm is None:
         _bm = meta0.get("bucket_b_match")
     _b_key = ""
+    _tm = ""
     _lt = ""
     if isinstance(_bm, dict) and _bm.get("matched"):
         _b_key = str(_bm.get("key") or "")
+        _tm = str((_b_parsed or {}).get("tm") or "")
         _lt = str((_b_parsed or {}).get("lt") or "")
 
     json_obj = {
@@ -133,6 +135,7 @@ def save_positions_json(
         "netd": netd,
         "gd": gd,
         "yield": yield_val,
+        "tm": _tm,
         "lt": _lt,
         "coord": {
             "rot_code": int(rot_code),

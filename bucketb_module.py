@@ -188,7 +188,12 @@ def parse_bucket_b_content(text):
             chip_data[chip_key] = {"FTN": ftn_map, "QTN": qtn_map}
         i += 1
 
-    # 3) LT 추출 (5번째 줄, 줄 중간에 위치)
+    # 3) TM 추출 (1번째 줄), LT 추출 (5번째 줄)
+    tm = ""
+    if len(lines) > 0:
+        tm_m = re.search(r'TM=(\S+)', lines[0])
+        if tm_m:
+            tm = tm_m.group(1)
     lt = ""
     if len(lines) > 4:
         lt_m = re.search(r'LT=(\S{2})', lines[4])
@@ -197,6 +202,7 @@ def parse_bucket_b_content(text):
 
     return {
         "first_line": first_line,
+        "tm": tm,
         "lt": lt,
         "ftn_keys": ftn_keys,
         "qtn_keys": qtn_keys,
