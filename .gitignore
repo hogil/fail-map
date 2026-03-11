@@ -44,8 +44,8 @@ Thumbs.db
 /positions/
 device_info.txt
 
-# Cython
+# Cython (build artifacts only — .pyx is source)
 *.c
-*.pyx
 cython_functions.so
 cython_functions.*.so
+cython_functions*.pyd

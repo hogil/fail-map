@@ -6,7 +6,7 @@ Positions JSON 생성 모듈
 - Bucket B match summary 포함
 """
 
-import os, json
+import os, re, json
 
 from utils import safe_prefix
 
@@ -79,17 +79,39 @@ def save_positions_json(
             }
         })
 
+    # ===== netd / gd / yield =====
+    netd = int(meta0.get("netd", 0) or 0)
+    gd = 0
+    for s in samples:
+        raw_b = str(s.get('b') or "").strip()
+        b_num = re.sub(r'\D', '', raw_b)
+        if b_num:
+            try:
+                if int(b_num) < 200:
+                    gd += 1
+            except:
+                pass
+    if netd > 0:
+        yield_val = f"{gd / netd * 100:.2f}"
+    else:
+        yield_val = "0.00"
+
     # ===== Bucket B match summary =====
     _bm = meta0.get("bucket_b_match")
     _match = "match실패"
     _b_key = ""
     _b_off = None
     _b_first = ""
+    _lt = ""
     if isinstance(_bm, dict) and _bm.get("matched"):
         _match = "match성공"
         _b_key = str(_bm.get("key") or "")
         _b_off = _bm.get("offset_sec")
         _b_first = str(_bm.get("first_line") or "")
+        # LT= 뒤 2글자 추출
+        lt_m = re.search(r'LT=(\S{2})', _b_first)
+        if lt_m:
+            _lt = lt_m.group(1)
 
     json_obj = {
         "match": _match,
@@ -107,6 +129,10 @@ def save_positions_json(
         "tester": meta0.get("tester", ""),
         "device": meta0.get("device", ""),
         "pgm": meta0.get("pgm", ""),
+        "netd": netd,
+        "gd": gd,
+        "yield": yield_val,
+        "lt": _lt,
         "coord": {
             "rot_code": int(rot_code),
             "x_min_abs": int(x_min),

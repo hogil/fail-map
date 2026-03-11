@@ -253,6 +253,11 @@ def process_file_content(args):
     tester = hval(lines, ":TESTER=")
     device = hval(lines, ":DEVICE=")
     pgm    = hval(lines, ":PGM=")
+    netd_raw = hval(lines, ":NETD=")
+    try:
+        netd = int(re.sub(r'\D', '', netd_raw)) if netd_raw else 0
+    except:
+        netd = 0
 
     try:
         xsize, ysize, start, root, step, wafer, rot = find_initial_values_from_lines(lines, file_name)
@@ -298,7 +303,7 @@ def process_file_content(args):
             "stime": stime,
             "rot": rot,
             "partid": partid, "tester": tester, "device": device, "pgm": pgm,
-            "orig_key": orig_key
+            "netd": netd, "orig_key": orig_key
         }
         i += 1
 
