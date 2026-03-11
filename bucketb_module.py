@@ -137,6 +137,65 @@ def generate_bucket_b_prefixes(info: dict, offset_range=(-10, 10)):
         yield f"{d}/{info['lot_id']}_{info['wafer_w']}_"
 
 
+# =================== Bucket B Content Parsing ===================
+
+def parse_bucket_b_content(text):
+    """
+    Bucket B 파일 전체 내용 파싱.
+    - FTN= 여러 줄 → ftn_keys 리스트
+    - QTN= 여러 줄 → qtn_keys 리스트
+    - 칩별 X= Y= 블록에서 F=, Q= 값 추출 → FTN/QTN 매핑
+    """
+    lines = text.splitlines()
+    if not lines:
+        return {"first_line": "", "ftn_keys": [], "qtn_keys": [], "chip_data": {}}
+
+    first_line = lines[0]
+
+    # 1) FTN= / QTN= 헤더 수집 (여러 줄 이어붙이기)
+    ftn_keys = []
+    qtn_keys = []
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("FTN="):
+            ftn_keys.extend(s[4:].split())
+        elif s.startswith("QTN="):
+            qtn_keys.extend(s[4:].split())
+
+    # 2) 칩별 데이터: X= Y= → F= / Q=
+    chip_data = {}
+    i = 0
+    while i < len(lines):
+        m = re.match(r'X=\s*(\S+)\s+Y=\s*(\S+)', lines[i].strip())
+        if m:
+            x_val = str(int(m.group(1)))
+            y_val = str(int(m.group(2)))
+            chip_key = f"{x_val}_{y_val}"
+            f_vals = []
+            q_vals = []
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j].strip()
+                if re.match(r'X=\s*(\S+)\s+Y=\s*(\S+)', nxt):
+                    break
+                if nxt.startswith("F="):
+                    f_vals = nxt[2:].split()
+                elif nxt.startswith("Q="):
+                    q_vals = nxt[2:].split()
+                j += 1
+            ftn_map = {k: (f_vals[idx] if idx < len(f_vals) else "") for idx, k in enumerate(ftn_keys)}
+            qtn_map = {k: (q_vals[idx] if idx < len(q_vals) else "") for idx, k in enumerate(qtn_keys)}
+            chip_data[chip_key] = {"FTN": ftn_map, "QTN": qtn_map}
+        i += 1
+
+    return {
+        "first_line": first_line,
+        "ftn_keys": ftn_keys,
+        "qtn_keys": qtn_keys,
+        "chip_data": chip_data,
+    }
+
+
 # =================== S3ManagerB ===================
 
 class S3ManagerB:
@@ -161,6 +220,14 @@ class S3ManagerB:
             else:
                 break
         return out
+
+    def read_gz_full(self, key: str) -> str:
+        try:
+            obj = self.client.get_object(Bucket=self.cfg.bucket_name, Key=key)
+            raw = gzip.decompress(obj["Body"].read())
+            return decode_best_effort(raw)
+        except:
+            return ""
 
     def read_gz_first_line(self, key: str, max_bytes: int = 65536) -> str:
         try:
@@ -351,20 +418,21 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
                 "reason": ("no_listed_keys" if not had_candidates else "not_found"),
             }
 
-    # 4) first line read (matched only)
+    # 4) full content read + parse (matched only)
     matched_keys = [m["key"] for m in match_map.values() if m.get("matched") and m.get("key")]
-    firstline_by_key = {}
+    parsed_by_key = {}
     if matched_keys:
         def _read_one(k):
-            return k, s3b.read_gz_first_line(k, max_bytes=cfg_b.firstline_max_bytes)
+            return k, s3b.read_gz_full(k)
         with ThreadPoolExecutor(max_workers=cfg_b.firstline_max_workers) as ex:
-            for k, line in ex.map(_read_one, matched_keys):
-                firstline_by_key[k] = line
+            for k, content in ex.map(_read_one, matched_keys):
+                parsed_by_key[k] = parse_bucket_b_content(content)
         for meta in match_map.values():
             if meta.get("matched") and meta.get("key"):
-                line = firstline_by_key.get(meta["key"], "")
-                meta["first_line"] = line
-                meta["first_line_ok"] = bool(line)
+                parsed = parsed_by_key.get(meta["key"], {})
+                meta["first_line"] = parsed.get("first_line", "")
+                meta["first_line_ok"] = bool(parsed.get("first_line"))
+                meta["bucket_b_parsed"] = parsed
 
     parse_failed = sum(1 for m in match_map.values() if m.get("reason") == "parse_failed")
     firstline_ok = sum(1 for m in match_map.values() if m.get("matched") and m.get("first_line_ok"))

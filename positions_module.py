@@ -58,26 +58,41 @@ def save_positions_json(
 
     chips_json = []
     for s in samples:
+        rawb = (str(s.get('b') or "").lstrip('0') or '0')
+        chips_json.append({
+            "x_abs": int(s['x']), "y_abs": int(s['y']), "b": rawb,
+        })
+
+    # ===== Bucket B f/q per chip =====
+    _bm = meta0.get("bucket_b_match")
+    _b_parsed = None
+    if isinstance(_bm, dict) and _bm.get("matched"):
+        _b_parsed = _bm.get("bucket_b_parsed")
+    if _b_parsed and _b_parsed.get("chip_data"):
+        chip_data_b = _b_parsed["chip_data"]
+        for chip_entry in chips_json:
+            chip_key = f"{chip_entry['x_abs']}_{chip_entry['y_abs']}"
+            cd = chip_data_b.get(chip_key)
+            if cd:
+                if cd.get("FTN"):
+                    chip_entry["f"] = cd["FTN"]
+                if cd.get("QTN"):
+                    chip_entry["q"] = cd["QTN"]
+
+    # rect / cal 은 f/q 뒤에 배치
+    for idx, s in enumerate(samples):
         x_abs = int(s['x']); y_abs = int(s['y'])
         i0 = x_abs - x_min; j0 = y_abs - y_min
         i, j = map_tile_after_rotation(i0, j0, rot_code, tiles_w_rot, tiles_h_rot)
-
-        x_cal = centerize_col(i, tiles_w_rot)
-        y_cal = centerize_row(j, tiles_h_rot)
-
         x0, x1 = xs_edges[i], xs_edges[i + 1]
         y0, y1 = ys_edges[j], ys_edges[j + 1]
-
-        rawb = (str(s.get('b') or "").lstrip('0') or '0')
-        chips_json.append({
-            "x_abs": x_abs, "y_abs": y_abs, "b": rawb,
-            "x_cal": int(x_cal), "y_cal": int(y_cal),
-            "rect": {
-                "x0": int(x0), "y0": int(y0), "x1": int(x1), "y1": int(y1),
-                "quad": [[int(x0), int(y0)], [int(x1), int(y0)],
-                         [int(x1), int(y1)], [int(x0), int(y1)]]
-            }
-        })
+        chips_json[idx]["x_cal"] = int(centerize_col(i, tiles_w_rot))
+        chips_json[idx]["y_cal"] = int(centerize_row(j, tiles_h_rot))
+        chips_json[idx]["rect"] = {
+            "x0": int(x0), "y0": int(y0), "x1": int(x1), "y1": int(y1),
+            "quad": [[int(x0), int(y0)], [int(x1), int(y0)],
+                     [int(x1), int(y1)], [int(x0), int(y1)]]
+        }
 
     # ===== netd / gd / yield =====
     netd = int(meta0.get("netd", 0) or 0)
@@ -97,13 +112,12 @@ def save_positions_json(
         yield_val = "0.00"
 
     # ===== Bucket B match summary =====
-    _bm = meta0.get("bucket_b_match")
-    _match = "match실패"
+    if _bm is None:
+        _bm = meta0.get("bucket_b_match")
     _b_key = ""
     _b_first = ""
     _lt = ""
     if isinstance(_bm, dict) and _bm.get("matched"):
-        _match = "match성공"
         _b_key = str(_bm.get("key") or "")
         _b_first = str(_bm.get("first_line") or "")
         # LT= 뒤 2글자 추출
@@ -112,7 +126,6 @@ def save_positions_json(
             _lt = lt_m.group(1)
 
     json_obj = {
-        "match": _match,
         "bucket_b_key": _b_key,
         "root": meta0.get("root", ""),
         "step": meta0.get("step", ""),
@@ -143,10 +156,6 @@ def save_positions_json(
         },
         "chips": chips_json
     }
-
-    # Bucket B 매칭 상세(디버그용)
-    if _bm is not None:
-        json_obj["bucket_b_match"] = _bm
 
     json_dir = os.path.join(positions_root, safe_prefix(p1), safe_prefix(p2), day)
     os.makedirs(json_dir, exist_ok=True)
