@@ -100,13 +100,11 @@ def save_positions_json(
     _bm = meta0.get("bucket_b_match")
     _match = "match실패"
     _b_key = ""
-    _b_off = None
     _b_first = ""
     _lt = ""
     if isinstance(_bm, dict) and _bm.get("matched"):
         _match = "match성공"
         _b_key = str(_bm.get("key") or "")
-        _b_off = _bm.get("offset_sec")
         _b_first = str(_bm.get("first_line") or "")
         # LT= 뒤 2글자 추출
         lt_m = re.search(r'LT=(\S{2})', _b_first)
@@ -116,15 +114,10 @@ def save_positions_json(
     json_obj = {
         "match": _match,
         "bucket_b_key": _b_key,
-        "bucket_b_offset_sec": _b_off,
-        "bucket_b_first_line": _b_first,
-        "image_path": output_path,
-        "kind": kind,
         "root": meta0.get("root", ""),
         "step": meta0.get("step", ""),
         "wafer": meta0.get("wafer", ""),
         "stime": stime,
-        "day": day,
         "partid": meta0.get("partid", ""),
         "tester": meta0.get("tester", ""),
         "device": meta0.get("device", ""),
