@@ -6,32 +6,9 @@ Positions JSON 생성 모듈
 - Bucket B match summary 포함
 """
 
-import os, re, json, tempfile
+import os, re, json
 
 from utils import safe_prefix
-
-
-def _append_unique_value(filepath, value):
-    """파일에 unique 값을 누적 저장 (JSON 배열)."""
-    if not value:
-        return
-    try:
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        existing = []
-        if os.path.exists(filepath):
-            with open(filepath, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-            if not isinstance(existing, list):
-                existing = []
-        if value not in existing:
-            existing.append(value)
-            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(filepath))
-            os.close(fd)
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(sorted(existing), f, ensure_ascii=False)
-            os.replace(tmp, filepath)
-    except Exception:
-        pass
 
 
 def map_tile_after_rotation(i0, j0, rot_code, tilesW_after, tilesH_after):
@@ -184,7 +161,3 @@ def save_positions_json(
     json_path = os.path.join(json_dir, base_name + ".json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(json_obj, f, ensure_ascii=False, indent=2)
-
-    # LT / TM unique 값 누적 저장
-    _append_unique_value(os.path.join(positions_root, "lt_values.json"), _lt)
-    _append_unique_value(os.path.join(positions_root, "tm_values.json"), _tm)
