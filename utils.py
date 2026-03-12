@@ -349,6 +349,16 @@ def process_file_content(args):
 # =================== Token → pair ===================
 
 def choose_pair_by_device(token, device_value, token2pps):
+    # 파일명 '1' 시작: :DEVICE= 에서 '-' 뒤 앞 2글자 → p1, "P1"+p1 → p2
+    if token == "_1START":
+        dev = (device_value or "").strip()
+        if "-" in dev:
+            after_dash = dev.split("-", 1)[1]
+            if len(after_dash) >= 2:
+                p1 = after_dash[:2]
+                return (p1, f"P1{p1}")
+        return ("NA", "NA")
+
     pairs = token2pps.get(str(token), [])
     if not pairs:
         return ("NA", "NA")
@@ -487,7 +497,7 @@ class S3Manager:
         return all_meta
 
     def prefilter_keys_by_filename(self, folders, token2pps, middle_map, start_dt, end_dt):
-        """00P/00C 둘 다 파일명 필터 + kind까지 리턴"""
+        """00P/00C 둘 다 파일명 필터 + kind까지 리턴. 파일명이 '1'로 시작하는 키도 수집."""
         from datetime import datetime as _dt
         all_meta = self.get_compressed_files_meta(folders, '.Z')
         keys = [k for k, _ in all_meta]
@@ -498,7 +508,10 @@ class S3Manager:
                 pat = rf'^\d{{2}}_{re.escape(str(tok))}.*{re.escape(middle)}.*?(?P<d>\d{{8}})[_-]?(?P<t>\d{{6}})'
                 rx_map[(str(tok), str(kind))] = re.compile(pat)
 
-        stats = dict(scanned=len(keys), token_hit=0, time_hit=0, kept=0)
+        # 파일명 '1' 시작 매칭용: 시간 추출 패턴
+        rx_1start = re.compile(r'(?P<d>\d{8})[_-]?(?P<t>\d{6})')
+
+        stats = dict(scanned=len(keys), token_hit=0, time_hit=0, kept=0, one_start=0)
         key_to_info = {}
         window_on = (start_dt is not None and end_dt is not None and (start_dt != end_dt))
 
@@ -520,6 +533,18 @@ class S3Manager:
                     except:
                         name_dt = None
                 break
+
+            # 파일명이 '1'로 시작하는 키: token 매칭 없이 수집
+            if not hit_tok and bn.startswith("1"):
+                hit_tok = "_1START"
+                hit_kind = "1START"
+                m_time = rx_1start.search(bn)
+                if window_on and m_time:
+                    try:
+                        name_dt = _dt.strptime(f"{m_time.group('d')}_{m_time.group('t')}", "%Y%m%d_%H%M%S")
+                    except:
+                        name_dt = None
+                stats['one_start'] += 1
 
             if not hit_tok:
                 continue
