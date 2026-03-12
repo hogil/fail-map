@@ -19,26 +19,24 @@ Fail-bit map PNG + positions JSON generator (00P/00C dual pipeline)
 5) Bucket B 매칭: bucketb_module에서 import하여 positions JSON에 match 결과 추가
 """
 
-import os, re, sys, time, json, io, zipfile, tempfile, shutil, gzip, tarfile, subprocess, importlib, multiprocessing
+import os, re, time, multiprocessing
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor
 
 import pandas as pd
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from tqdm import tqdm
 
 from utils import (
-    create_s3_client, decode_best_effort,
-    split_key_and_inner, safe_name, safe_prefix,
+    safe_name, safe_prefix,
     select_folders_by_window, cleanup_empty_p2_and_dates,
-    hex_to_rgb, flatten_palette_by_keys,
-    hval, parse_stime, parse_stime_dt,
+    hval, parse_stime_dt,
     choose_pair_by_device, setup_environment,
-    get_cython_convert_hex,
     ttf_cached, save_indexed32_png,
+    build_palette, process_file_content,
+    S3Manager,
 )
 from bucketb_module import CFG_B, S3ManagerB, build_bucket_b_match_map_prefixlist
 from positions_module import save_positions_json, map_tile_after_rotation
@@ -83,220 +81,9 @@ class PipelineConfig:
 CFG = PipelineConfig()
 CFG.folder_filter_middles = {"00P": "-00P_", "00C": "-00C_"}
 
-with open(CFG.color_json, 'r', encoding='utf-8') as f:
-    _cd = json.load(f)
-
-# 사용할 set 선택 (default 고정)
-_d   = _cd['default']
-_top = _d['top']
-_btm = _d.get('bottom', {})
-
-# 색상 맵 (Grade + bg/text + border + BINs)
-PALETTE_HEX_MAP = {
-    # Grade
-    "chip0": _top.get("Grade0", "#FFFFFF"),
-    "chip1": _top.get("Grade1", "#9B9B9B"),
-    "chip2": _top.get("Grade2", "#009619"),
-    "chip3": _top.get("Grade3", "#0000FF"),
-    "chip4": _top.get("Grade4", "#D91DFF"),
-    "chip5": _top.get("Grade5", "#FFFF00"),
-    "chip6": _top.get("Grade6", "#FF0000"),
-    "chip7": _top.get("Grade7", "#000000"),
-
-    # bg/text
-    "bg":   _d.get("background", "#FEFEFE"),
-    "text": _d.get("text", "#000001"),
-
-    # border
-    "border":     _btm.get("Normal",  "#BEBEBE"),
-    "border_inv": _btm.get("Invalid", "#FF9900"),
-
-    # 00P BIN
-    "border_b285": _btm.get("B285", "#0099FF"),
-    "border_b286": _btm.get("B286", "#FF714F"),
-    "border_b287": _btm.get("B287", "#66FFCC"),
-    "border_b288": _btm.get("B288", "#DA26CD"),
-    "border_b290": _btm.get("B290", "#FFD700"),
-    "border_b291": _btm.get("B291", "#32CD32"),
-
-    # 00C BIN
-    "border_b300": _btm.get("B300", "#AAAAAA"),
-    "border_b385": _btm.get("B385", "#00C8FF"),
-    "border_b386": _btm.get("B386", "#FF00C8"),
-    "border_b388": _btm.get("B388", "#00FF66"),
-    "border_b389": _btm.get("B389", "#FF6666"),
-    "border_b390": _btm.get("B390", "#6666FF"),
-}
-
-# ✅ 팔레트 인덱스 순서(요구사항):
-# Grade(0..7 고정) → bg/text → border(normal/invalid) → BIN들
-PALETTE_INDEX_TO_KEY = [
-    # 0..7 (절대 고정)
-    "chip0","chip1","chip2","chip3","chip4","chip5","chip6","chip7",
-
-    # bg/text
-    "bg","text",
-
-    # border
-    "border","border_inv",
-
-    # 00P BIN
-    "border_b285","border_b286","border_b287","border_b288","border_b290","border_b291",
-
-    # 00C BIN
-    "border_b300","border_b385","border_b386","border_b388","border_b389","border_b390",
-]
-
-KEY_TO_INDEX = {k:i for i,k in enumerate(PALETTE_INDEX_TO_KEY)}
-
-# reserve
-IDX_INVALID_FILL = 31  # invalid fill은 팔레트 마지막(31)을 사용(흰색 등으로 지정)
-IDX_BG         = KEY_TO_INDEX["bg"]
-IDX_TEXT       = KEY_TO_INDEX["text"]
-IDX_BORDER     = KEY_TO_INDEX["border"]
-IDX_BORDER_INV = KEY_TO_INDEX["border_inv"]
-
-# ✅ kind별 BIN 테두리 적용(화이트리스트)
-IDX_B_DEF_00P = {
-    "285": KEY_TO_INDEX["border_b285"],
-    "286": KEY_TO_INDEX["border_b286"],
-    "287": KEY_TO_INDEX["border_b287"],
-    "288": KEY_TO_INDEX["border_b288"],
-    "290": KEY_TO_INDEX["border_b290"],
-    "291": KEY_TO_INDEX["border_b291"],
-}
-IDX_B_DEF_00C = {
-    "300": KEY_TO_INDEX["border_b300"],
-    "385": KEY_TO_INDEX["border_b385"],
-    "386": KEY_TO_INDEX["border_b386"],
-    "388": KEY_TO_INDEX["border_b388"],
-    "389": KEY_TO_INDEX["border_b389"],
-    "390": KEY_TO_INDEX["border_b390"],
-}
-
-PALETTE_32 = flatten_palette_by_keys(PALETTE_HEX_MAP, PALETTE_INDEX_TO_KEY, 32)
-# invalid fill 색: 흰색
-PALETTE_32[IDX_INVALID_FILL*3:IDX_INVALID_FILL*3+3] = hex_to_rgb("#FFFFFF")
-
-# =================== Parsing ===================
-
-def find_initial_values_from_lines(lines, file_name):
-    """
-    파일 포맷에서 x/y size, 데이터 시작 라인 등을 찾아 타일 크기를 결정
-    """
-    wfid = lines[1].split('=')[1].strip()
-    base = os.path.basename((file_name or "").split("::")[-1])
-    root = (base.split('-', 1)[0] if '-' in base else base).upper()
-    step, wafer = wfid.split('-',1)[1].split('.',1)
-
-    xsize = int(lines[11].split('=')[1])
-    ysize = int(lines[12].split('=')[1])
-
-    rot = 5
-    if len(lines) > 8 and '=' in lines[8]:
-        try:
-            rot = int(lines[8].split('=',1)[1].strip())
-        except:
-            rot = 5
-
-    start, line_offset = None, 1
-    for i in range(28, 40):
-        if i < len(lines) and lines[i].startswith('X='):
-            start = i
-            if i+1 < len(lines) and lines[i+1].startswith('mft'):
-                line_offset = 2
-            break
-    if start is None:
-        raise ValueError("X= start not found")
-
-    # 일부 포맷 대응(축 swap 등)
-    for i in range(start, min(start+10, len(lines))):
-        if lines[i].startswith('#'):
-            if i + xsize < len(lines) and lines[i+xsize].startswith('X='):
-                xsize, ysize = ysize, xsize
-            else:
-                xsize = int((len(lines[i]) - 1)//2)
-                start = i - line_offset
-                for j in range(i, min(i+1000, len(lines))):
-                    if lines[j].startswith('X='):
-                        ysize = j - i
-                        break
-            break
-
-    return xsize, ysize, start, root, step, wafer, rot
-
-def process_file_content(args):
-    """
-    워커에서 실행: 텍스트 1개를 파싱해 chip sample list를 반환.
-    kind(00P/00C)는 여기서 결정하지 않고, 상위에서 tagged로 붙인다.
-    """
-    file_name, file_content = args
-    if not file_content:
-        return []
-    lines = file_content.splitlines()
-    if not lines:
-        return []
-
-    stime  = parse_stime(lines)
-    partid = hval(lines, ":PARTID=")
-    tester = hval(lines, ":TESTER=")
-    device = hval(lines, ":DEVICE=")
-    pgm    = hval(lines, ":PGM=")
-    netd_raw = hval(lines, ":NETD=")
-    try:
-        netd = int(re.sub(r'\D', '', netd_raw)) if netd_raw else 0
-    except:
-        netd = 0
-
-    try:
-        xsize, ysize, start, root, step, wafer, rot = find_initial_values_from_lines(lines, file_name)
-    except:
-        return []
-
-    convert_hex_values = get_cython_convert_hex()
-    last_by_xy = {}
-
-    i = start
-    while i < len(lines):
-        if not lines[i].startswith('X='):
-            i += 1
-            continue
-
-        m = dict(re.findall(r'([XYbB])\s*=\s*([-\w]+)', lines[i].strip()))
-        try:
-            cx = int(m.get('X', '0')); cy = int(m.get('Y', '0'))
-        except:
-            parts = lines[i].split()
-            cx = int(parts[1]) if len(parts) > 1 else 0
-            cy = int(parts[3]) if len(parts) > 3 else 0
-
-        cb = (m.get('b') or m.get('B') or '').strip()
-
-        j = i + 1
-        if j < len(lines) and lines[j].startswith('mft'):
-            j += 1
-
-        hex_block = ""
-        if j < len(lines) and lines[j].startswith('#'):
-            try:
-                hex_block = convert_hex_values(lines, j, xsize, ysize)
-            except:
-                # cython 예외(파이썬)는 여기서 빈 블록 처리
-                hex_block = ""
-
-        orig_key = split_key_and_inner(file_name)
-        last_by_xy[(cx, cy)] = {
-            "root": root, "step": step, "wafer": wafer,
-            "x": cx, "y": cy, "b": cb,
-            "transformed_values": hex_block,
-            "stime": stime,
-            "rot": rot,
-            "partid": partid, "tester": tester, "device": device, "pgm": pgm,
-            "netd": netd, "orig_key": orig_key
-        }
-        i += 1
-
-    return list(last_by_xy.values())
+(PALETTE_HEX_MAP, PALETTE_INDEX_TO_KEY, KEY_TO_INDEX,
+ IDX_INVALID_FILL, IDX_BG, IDX_TEXT, IDX_BORDER, IDX_BORDER_INV,
+ IDX_B_DEF_00P, IDX_B_DEF_00C, PALETTE_32) = build_palette(CFG.color_json)
 
 # =================== Image generation ===================
 
@@ -496,259 +283,6 @@ def create_sample_image_func(args):
 
     return output_path
 
-# =================== S3 / Decompress ===================
-
-class S3Manager:
-    def __init__(self, cfg: PipelineConfig):
-        self.cfg = cfg
-        self.client = create_s3_client(cfg)
-
-    def get_top_level_folders(self):
-        p = self.client.get_paginator('list_objects_v2')
-        folders = []
-        for page in p.paginate(Bucket=self.cfg.bucket_name, Delimiter='/'):
-            folders.extend(cp['Prefix'] for cp in page.get('CommonPrefixes', []))
-        return sorted(folders)
-
-    def get_compressed_files_meta(self, folders, file_pattern='.Z'):
-        from collections import deque
-        p = self.client.get_paginator('list_objects_v2')
-
-        def list_all(prefix):
-            out = []
-            st = deque([prefix])
-            while st:
-                cur = st.pop()
-                for page in p.paginate(Bucket=self.cfg.bucket_name, Prefix=cur, Delimiter='/'):
-                    for obj in page.get('Contents', []) or []:
-                        key = obj['Key']
-                        if key.endswith(file_pattern):
-                            out.append((key, obj.get('LastModified')))
-                    for cp in page.get('CommonPrefixes', []) or []:
-                        st.append(cp.get('Prefix'))
-            return out
-
-        all_meta = []
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            for files in tqdm(ex.map(list_all, folders), total=len(folders), desc="List files (meta)"):
-                all_meta.extend(files)
-        return all_meta
-
-    def prefilter_keys_by_filename(self, folders, token2pps, middle_map, start_dt, end_dt):
-        """
-        ✅ 00P/00C 둘 다 파일명 필터 + kind까지 리턴
-        return:
-          key_to_info[key] = (token, kind)  kind in {"00P","00C"}
-        """
-        all_meta = self.get_compressed_files_meta(folders, '.Z')
-        keys = [k for k, _ in all_meta]
-
-        rx_map = {}  # (tok, kind) -> regex
-        for tok in token2pps.keys():
-            for kind, middle in middle_map.items():
-                pat = rf'^\d{{2}}_{re.escape(str(tok))}.*{re.escape(middle)}.*?(?P<d>\d{{8}})[_-]?(?P<t>\d{{6}})'
-                rx_map[(str(tok), str(kind))] = re.compile(pat)
-
-        stats = dict(scanned=len(keys), token_hit=0, time_hit=0, kept=0)
-        key_to_info = {}
-        window_on = (start_dt is not None and end_dt is not None and (start_dt != end_dt))
-
-        for key in keys:
-            bn = os.path.basename(key)
-            hit_tok = None
-            hit_kind = None
-            name_dt = None
-
-            for (tok, kind), rx in rx_map.items():
-                m = rx.search(bn)
-                if not m:
-                    continue
-                hit_tok = tok
-                hit_kind = kind
-                if window_on:
-                    try:
-                        name_dt = datetime.strptime(f"{m.group('d')}_{m.group('t')}", "%Y%m%d_%H%M%S")
-                    except:
-                        name_dt = None
-                break
-
-            if not hit_tok:
-                continue
-            stats['token_hit'] += 1
-
-            if window_on:
-                if name_dt is None:
-                    continue
-                if not (start_dt <= name_dt <= end_dt):
-                    continue
-                stats['time_hit'] += 1
-
-            key_to_info[key] = (hit_tok, hit_kind)
-            stats['kept'] += 1
-
-        return key_to_info, stats
-
-    def download_and_decompress_parallel(self, keys):
-        if not keys:
-            return []
-        try:
-            from unlzw3 import unlzw
-        except:
-            unlzw = None
-        try:
-            import py7zr
-        except:
-            py7zr = None
-        sevenz = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
-
-        _decode = decode_best_effort
-
-        def _sig_7z(b): return len(b) >= 6 and b[:6] == b"7z\xBC\xAF\x27\x1C"
-        def _sig_Z(b):  return len(b) >= 2 and b[:2] == b"\x1f\x9d"
-        def _sig_gz(b): return len(b) >= 2 and b[:2] == b"\x1f\x8b"
-        def _is_zip(b):
-            try:
-                return zipfile.is_zipfile(io.BytesIO(b))
-            except:
-                return False
-
-        def _extract_zip(data, tag):
-            out = []
-            with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                for n in zf.namelist():
-                    if n.endswith("/"):
-                        continue
-                    out.append((f"{tag}::{n}", zf.read(n)))
-            return out
-
-        def _extract_py7zr(data, tag):
-            if not py7zr:
-                return []
-            out = []
-            try:
-                with py7zr.SevenZipFile(io.BytesIO(data)) as ar:
-                    for n, fobj in ar.readall().items():
-                        out.append((f"{tag}::{n}", fobj.read()))
-            except:
-                pass
-            return out
-
-        def _extract_7z_cli(data, tag):
-            out = []
-            if not sevenz:
-                return out
-            with tempfile.TemporaryDirectory() as td:
-                inpath = os.path.join(td, "in.bin")
-                with open(inpath, "wb") as f:
-                    f.write(data)
-                cmd = [sevenz, "x", inpath, f"-o{td}", "-y", "-bd", "-bso0", "-bsp0"]
-                try:
-                    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except:
-                    return out
-                for root, _, files in os.walk(td):
-                    for fn in files:
-                        p = os.path.join(root, fn)
-                        rel = os.path.relpath(p, td).replace("\\", "/")
-                        with open(p, "rb") as f:
-                            out.append((f"{tag}::{rel}", f.read()))
-            return out
-
-        def _extract_tar_like(data, tag):
-            out = []
-            bio = io.BytesIO(data)
-            try:
-                with tarfile.open(fileobj=bio, mode="r:*") as tf:
-                    for m in tf.getmembers():
-                        if not m.isfile():
-                            continue
-                        f = tf.extractfile(m)
-                        if f:
-                            out.append((f"{tag}::{m.name}", f.read()))
-            except:
-                pass
-            return out
-
-        def _expand(name, data, depth=0):
-            if depth > 6:
-                return [(name, _decode(data))]
-
-            if _is_zip(data):
-                try:
-                    pairs = _extract_zip(data, name)
-                except:
-                    pairs = _extract_py7zr(data, name) or _extract_7z_cli(data, name)
-                if pairs:
-                    out = []
-                    for n, b in pairs:
-                        out.extend(_expand(n, b, depth + 1))
-                    return out
-
-            if _sig_7z(data):
-                pairs = _extract_py7zr(data, name) or _extract_7z_cli(data, name)
-                if pairs:
-                    out = []
-                    for n, b in pairs:
-                        out.extend(_expand(n, b, depth + 1))
-                    return out
-
-            if _sig_gz(data):
-                try:
-                    u = gzip.decompress(data)
-                    return _expand(name.rsplit(".gz", 1)[0], u, depth + 1)
-                except:
-                    pass
-
-            if name.lower().endswith(".z"):
-                if unlzw is not None and _sig_Z(data):
-                    try:
-                        u = unlzw(data)
-                        base = name.rsplit(".Z", 1)[0]
-                        return _expand(base, u, depth + 1)
-                    except:
-                        pass
-                pairs = _extract_py7zr(data, name) or _extract_7z_cli(data, name)
-                if not pairs and _is_zip(data):
-                    try:
-                        pairs = _extract_zip(data, name)
-                    except:
-                        pairs = _extract_py7zr(data, name) or _extract_7z_cli(data, name)
-                if not pairs:
-                    pairs = _extract_tar_like(data, name)
-                if pairs:
-                    out = []
-                    for n, b in pairs:
-                        out.extend(_expand(n, b, depth + 1))
-                    return out
-
-            pairs = _extract_tar_like(data, name) or _extract_py7zr(data, name) or _extract_7z_cli(data, name)
-            if pairs:
-                out = []
-                for n, b in pairs:
-                    out.extend(_expand(n, b, depth + 1))
-                return out
-
-            return [(name, _decode(data))]
-
-        def _one(key):
-            try:
-                body = self.client.get_object(Bucket=self.cfg.bucket_name, Key=key)['Body'].read()
-            except Exception as e:
-                print(f"[s3] Error {key}: {e}")
-                return []
-            try:
-                flat = _expand(key, body, 0)
-                return [(n, t) for n, t in flat if isinstance(t, str) and t.strip()]
-            except Exception as e:
-                print(f"[extract] Error {key}: {e}")
-                return []
-
-        allc = []
-        with ThreadPoolExecutor(max_workers=self.cfg.download_threads) as ex:
-            for part in tqdm(ex.map(_one, keys), total=len(keys), desc="Download+Decompress"):
-                allc.extend(part)
-        return allc
-
 # =================== Processor / Generator ===================
 
 class DataProcessor:
@@ -780,6 +314,23 @@ class DataProcessor:
                 r["kind"] = kind  # ✅ 00P/00C
                 out.append(r)
         return out
+
+def _calc_yield(samples):
+    """Yield = (pass dies / total valid dies) * 100. Pass = all grade values are '0'."""
+    total = 0
+    pass_count = 0
+    for s in samples:
+        tv = s.get('transformed_values', '')
+        if not tv:
+            continue
+        total += 1
+        clean = tv.replace(',', '')
+        if clean and all(c == '0' for c in clean):
+            pass_count += 1
+    if total == 0:
+        return 0.0
+    return (pass_count / total) * 100
+
 
 class ImageGenerator:
     def __init__(self, cfg: PipelineConfig):
@@ -818,9 +369,10 @@ class ImageGenerator:
             os.makedirs(out_dir, exist_ok=True)
 
             wafer_for_name = wafer[1:] if str(wafer).startswith("W") else wafer
+            yld = _calc_yield(samples)
             out_path = os.path.join(
                 out_dir,
-                f"{safe_name(root)}_{safe_name(step)}_{safe_name(wafer_for_name)}_{safe_name(stime)}.png"
+                f"{safe_name(root)}_{safe_name(step)}_{safe_name(wafer_for_name)}_{safe_name(stime)}_{yld:.1f}.png"
             )
 
             tasks.append((
