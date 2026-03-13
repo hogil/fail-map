@@ -315,22 +315,34 @@ class DataProcessor:
                 out.append(r)
         return out
 
-def _calc_yield(samples):
-    """Yield = (gd / netd) * 100. gd = bin < 200인 칩 수, netd = 첫 샘플의 :NETD= 값."""
+_SYS_BINS_00P = set(range(285, 292))  # 285~291
+_SYS_BINS_00C = {300} | set(range(385, 391))  # 300, 385~390
+
+
+def _calc_yield_and_sys(samples, kind):
+    """
+    yield = (gd / netd) * 100.  gd = bin < 200인 칩 수.
+    sys   = (sys_count / netd) * 100.  sys_count = kind별 defect bin 칩 수.
+    """
     netd = int(samples[0].get("netd", 0) or 0) if samples else 0
+    sys_bins = _SYS_BINS_00C if kind == "00C" else _SYS_BINS_00P
     gd = 0
+    sys_count = 0
     for s in samples:
         raw_b = str(s.get('b') or "").strip()
         b_num = re.sub(r'\D', '', raw_b)
         if b_num:
             try:
-                if int(b_num) < 200:
+                n = int(b_num)
+                if n < 200:
                     gd += 1
+                if n in sys_bins:
+                    sys_count += 1
             except:
                 pass
     if netd > 0:
-        return gd / netd * 100
-    return 0.0
+        return gd / netd * 100, sys_count / netd * 100
+    return 0.0, 0.0
 
 
 class ImageGenerator:
@@ -370,10 +382,10 @@ class ImageGenerator:
             os.makedirs(out_dir, exist_ok=True)
 
             wafer_for_name = wafer[1:] if str(wafer).startswith("W") else wafer
-            yld = _calc_yield(samples)
+            yld, sys_val = _calc_yield_and_sys(samples, kind)
             out_path = os.path.join(
                 out_dir,
-                f"{safe_name(root)}_{safe_name(step)}_{safe_name(wafer_for_name)}_{safe_name(stime)}_{yld:.1f}.png"
+                f"{safe_name(root)}_{safe_name(step)}_{safe_name(wafer_for_name)}_{safe_name(stime)}_{yld:.1f}_{sys_val:.1f}.png"
             )
 
             tasks.append((

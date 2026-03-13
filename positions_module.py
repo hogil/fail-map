@@ -94,22 +94,31 @@ def save_positions_json(
                      [int(x1), int(y1)], [int(x0), int(y1)]]
         }
 
-    # ===== netd / gd / yield =====
+    # ===== netd / gd / yield / sys =====
     netd = int(meta0.get("netd", 0) or 0)
+    _sys_bins_00p = set(range(285, 292))
+    _sys_bins_00c = {300} | set(range(385, 391))
+    sys_bins = _sys_bins_00c if kind == "00C" else _sys_bins_00p
     gd = 0
+    sys_count = 0
     for s in samples:
         raw_b = str(s.get('b') or "").strip()
         b_num = re.sub(r'\D', '', raw_b)
         if b_num:
             try:
-                if int(b_num) < 200:
+                n = int(b_num)
+                if n < 200:
                     gd += 1
+                if n in sys_bins:
+                    sys_count += 1
             except:
                 pass
     if netd > 0:
         yield_val = f"{gd / netd * 100:.2f}"
+        sys_val = f"{sys_count / netd * 100:.2f}"
     else:
         yield_val = "0.00"
+        sys_val = "0.00"
 
     # ===== Bucket B match summary =====
     if _bm is None:
@@ -135,6 +144,7 @@ def save_positions_json(
         "netd": netd,
         "gd": gd,
         "yield": yield_val,
+        "sys": sys_val,
         "tm": _tm,
         "lt": _lt,
         "coord": {
