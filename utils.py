@@ -349,8 +349,8 @@ def process_file_content(args):
 # =================== Token → pair ===================
 
 def choose_pair_by_device(token, device_value, token2pps):
-    # 파일명 '1' 시작: :DEVICE= 에서 '-' 뒤 앞 2글자 → p1, "P1"+p1 → p2
-    if token == "_1START":
+    # LOT ID '1' 시작: :DEVICE= 에서 '-' 뒤 앞 2글자 → p1, "P1"+p1 → p2
+    if token == "_1LOT":
         dev = (device_value or "").strip()
         if "-" in dev:
             after_dash = dev.split("-", 1)[1]
@@ -497,7 +497,7 @@ class S3Manager:
         return all_meta
 
     def prefilter_keys_by_filename(self, folders, token2pps, middle_map, start_dt, end_dt):
-        """00P/00C 둘 다 파일명 필터 + kind까지 리턴. 파일명이 '1'로 시작하는 키도 수집."""
+        """00P/00C 둘 다 파일명 필터 + kind까지 리턴. LOT ID가 '1'로 시작하는 키도 수집."""
         from datetime import datetime as _dt
         all_meta = self.get_compressed_files_meta(folders, '.Z')
         keys = [k for k, _ in all_meta]
@@ -508,10 +508,10 @@ class S3Manager:
                 pat = rf'^\d{{2}}_{re.escape(str(tok))}.*{re.escape(middle)}.*?(?P<d>\d{{8}})[_-]?(?P<t>\d{{6}})'
                 rx_map[(str(tok), str(kind))] = re.compile(pat)
 
-        # 파일명 '1' 시작 매칭용: 시간 추출 패턴
-        rx_1start = re.compile(r'(?P<d>\d{8})[_-]?(?P<t>\d{6})')
+        # LOT ID '1' 시작 매칭용: 시간 추출 패턴
+        rx_1lot_time = re.compile(r'(?P<d>\d{8})[_-]?(?P<t>\d{6})')
 
-        stats = dict(scanned=len(keys), token_hit=0, time_hit=0, kept=0, one_start=0)
+        stats = dict(scanned=len(keys), token_hit=0, time_hit=0, kept=0)
         key_to_info = {}
         window_on = (start_dt is not None and end_dt is not None and (start_dt != end_dt))
 
@@ -534,17 +534,19 @@ class S3Manager:
                         name_dt = None
                 break
 
-            # 파일명이 '1'로 시작하는 키: token 매칭 없이 수집
-            if not hit_tok and bn.startswith("1"):
-                hit_tok = "_1START"
-                hit_kind = "1START"
-                m_time = rx_1start.search(bn)
-                if window_on and m_time:
-                    try:
-                        name_dt = _dt.strptime(f"{m_time.group('d')}_{m_time.group('t')}", "%Y%m%d_%H%M%S")
-                    except:
-                        name_dt = None
-                stats['one_start'] += 1
+            # LOT ID가 '1'로 시작 + 00P/00C 조건: ex) 07_1AB382-00P_N_20260311_230051.Z
+            if not hit_tok and re.match(r'^\d{2}_1', bn):
+                for kind, middle in middle_map.items():
+                    if middle in bn:
+                        hit_tok = "_1LOT"
+                        hit_kind = kind
+                        m_time = rx_1lot_time.search(bn)
+                        if window_on and m_time:
+                            try:
+                                name_dt = _dt.strptime(f"{m_time.group('d')}_{m_time.group('t')}", "%Y%m%d_%H%M%S")
+                            except:
+                                name_dt = None
+                        break
 
             if not hit_tok:
                 continue
