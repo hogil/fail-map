@@ -473,12 +473,18 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
         if misses:
             import json
             os.makedirs(miss_dir, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            miss_path = os.path.join(miss_dir, f"match_miss_{ts}.json")
+            miss_path = os.path.join(miss_dir, "match_miss.json")
             try:
+                existing = []
+                if os.path.exists(miss_path):
+                    with open(miss_path, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                    if not isinstance(existing, list):
+                        existing = []
+                existing.extend(misses)
                 with open(miss_path, "w", encoding="utf-8") as f:
-                    json.dump(misses, f, ensure_ascii=False, indent=2)
-                print(f"[bucketB] match miss {len(misses)}건 → {miss_path}")
+                    json.dump(existing, f, ensure_ascii=False, indent=2)
+                print(f"[bucketB] match miss {len(misses)}건 누적 → {miss_path} (총 {len(existing)}건)")
             except Exception as e:
                 print(f"[bucketB] match miss 파일 저장 실패: {e}")
 
