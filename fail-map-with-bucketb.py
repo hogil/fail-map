@@ -316,20 +316,21 @@ class DataProcessor:
         return out
 
 def _calc_yield(samples):
-    """Yield = (pass dies / total valid dies) * 100. Pass = all grade values are '0'."""
-    total = 0
-    pass_count = 0
+    """Yield = (gd / netd) * 100. gd = bin < 200인 칩 수, netd = 첫 샘플의 :NETD= 값."""
+    netd = int(samples[0].get("netd", 0) or 0) if samples else 0
+    gd = 0
     for s in samples:
-        tv = s.get('transformed_values', '')
-        if not tv:
-            continue
-        total += 1
-        clean = tv.replace(',', '')
-        if clean and all(c == '0' for c in clean):
-            pass_count += 1
-    if total == 0:
-        return 0.0
-    return (pass_count / total) * 100
+        raw_b = str(s.get('b') or "").strip()
+        b_num = re.sub(r'\D', '', raw_b)
+        if b_num:
+            try:
+                if int(b_num) < 200:
+                    gd += 1
+            except:
+                pass
+    if netd > 0:
+        return gd / netd * 100
+    return 0.0
 
 
 class ImageGenerator:
