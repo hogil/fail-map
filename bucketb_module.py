@@ -258,7 +258,7 @@ class S3ManagerB:
 
 # =================== Main Match Function ===================
 
-def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: BucketBConfig, chunk_label: str = ""):
+def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: BucketBConfig, chunk_label: str = "", miss_dir: str = ""):
     """
     returns: dict[a_key] -> match_meta
     """
@@ -457,4 +457,29 @@ def build_bucket_b_match_map_prefixlist(part_keys_a, s3b: S3ManagerB, cfg_b: Buc
         f"{read_part} parse_failed={parse_failed} prefixes={len(prefixes)} listed_keys={all_listed}"
         f" in {time.time()-t0:.2f}s"
     )
+
+    # match miss 기록: miss가 있을 때만 파일 생성
+    if miss_dir:
+        misses = []
+        for ka, meta in match_map.items():
+            if meta.get("matched"):
+                continue
+            misses.append({
+                "bucket_a_key": ka,
+                "expected_bucket_b_key": meta.get("expected_key0", ""),
+                "expected_time_range": meta.get("expected_range", ""),
+                "reason": meta.get("reason", ""),
+            })
+        if misses:
+            import json
+            os.makedirs(miss_dir, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            miss_path = os.path.join(miss_dir, f"match_miss_{ts}.json")
+            try:
+                with open(miss_path, "w", encoding="utf-8") as f:
+                    json.dump(misses, f, ensure_ascii=False, indent=2)
+                print(f"[bucketB] match miss {len(misses)}건 → {miss_path}")
+            except Exception as e:
+                print(f"[bucketB] match miss 파일 저장 실패: {e}")
+
     return match_map
