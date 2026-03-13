@@ -157,6 +157,7 @@ def build_palette(color_json_path):
         "border_b388": _btm.get("B388", "#00FF66"),
         "border_b389": _btm.get("B389", "#FF6666"),
         "border_b390": _btm.get("B390", "#6666FF"),
+        "border_etc": _btm.get("ETC", "#999999"),
     }
 
     palette_index_to_key = [
@@ -165,6 +166,7 @@ def build_palette(color_json_path):
         "border","border_inv",
         "border_b285","border_b286","border_b287","border_b288","border_b290","border_b291",
         "border_b300","border_b385","border_b386","border_b388","border_b389","border_b390",
+        "border_etc",
     ]
 
     key_to_index = {k: i for i, k in enumerate(palette_index_to_key)}
@@ -192,12 +194,14 @@ def build_palette(color_json_path):
         "390": key_to_index["border_b390"],
     }
 
+    idx_etc = key_to_index["border_etc"]
+
     palette_32 = flatten_palette_by_keys(palette_hex_map, palette_index_to_key, 32)
     palette_32[idx_invalid_fill * 3:idx_invalid_fill * 3 + 3] = hex_to_rgb("#FFFFFF")
 
     return (palette_hex_map, palette_index_to_key, key_to_index,
             idx_invalid_fill, idx_bg, idx_text, idx_border, idx_border_inv,
-            idx_b_def_00p, idx_b_def_00c, palette_32)
+            idx_b_def_00p, idx_b_def_00c, idx_etc, palette_32)
 
 
 # =================== Header parsing ===================

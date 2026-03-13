@@ -83,7 +83,7 @@ CFG.folder_filter_middles = {"00P": "-00P_", "00C": "-00C_"}
 
 (PALETTE_HEX_MAP, PALETTE_INDEX_TO_KEY, KEY_TO_INDEX,
  IDX_INVALID_FILL, IDX_BG, IDX_TEXT, IDX_BORDER, IDX_BORDER_INV,
- IDX_B_DEF_00P, IDX_B_DEF_00C, PALETTE_32) = build_palette(CFG.color_json)
+ IDX_B_DEF_00P, IDX_B_DEF_00C, IDX_ETC, PALETTE_32) = build_palette(CFG.color_json)
 
 # =================== Image generation ===================
 
@@ -241,6 +241,8 @@ def create_sample_image_func(args):
             cidx = IDX_BORDER_INV
         elif num_key in IDX_B_DEF_LOCAL:
             cidx = IDX_B_DEF_LOCAL[num_key]
+        elif num_key and int(num_key) >= 200:
+            cidx = IDX_ETC
         else:
             cidx = None
 
