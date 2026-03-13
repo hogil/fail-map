@@ -317,8 +317,8 @@ class DataProcessor:
                 out.append(r)
         return out
 
-_SYS_BINS_00P = set(range(285, 292))  # 285~291
-_SYS_BINS_00C = {300} | set(range(385, 391))  # 300, 385~390
+_SYS_BINS_00P = {285, 286, 287, 288, 290, 291}
+_SYS_BINS_00C = {300, 385, 386, 388, 389, 390}
 
 
 def _calc_yield_and_sys(samples, kind):

@@ -96,8 +96,8 @@ def save_positions_json(
 
     # ===== netd / gd / yield / sys =====
     netd = int(meta0.get("netd", 0) or 0)
-    _sys_bins_00p = set(range(285, 292))
-    _sys_bins_00c = {300} | set(range(385, 391))
+    _sys_bins_00p = {285, 286, 287, 288, 290, 291}
+    _sys_bins_00c = {300, 385, 386, 388, 389, 390}
     sys_bins = _sys_bins_00c if kind == "00C" else _sys_bins_00p
     gd = 0
     sys_count = 0
