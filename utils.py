@@ -349,14 +349,12 @@ def process_file_content(args):
 # =================== Token → pair ===================
 
 def choose_pair_by_device(token, device_value, token2pps):
-    # LOT ID '1' 시작: :DEVICE= 에서 '-' 뒤 앞 2글자 → p1, "P1"+p1 → p2
+    # LOT ID '1' 시작: :DEVICE= 끝에서 3번째,2번째 글자 → p1, "P1"+p1 → p2
     if token == "_1LOT":
         dev = (device_value or "").strip()
-        if "-" in dev:
-            after_dash = dev.split("-", 1)[1]
-            if len(after_dash) >= 2:
-                p1 = after_dash[:2]
-                return (p1, f"P1{p1}")
+        if len(dev) >= 3:
+            p1 = dev[-3:-1]
+            return (p1, f"P1{p1}")
         return ("NA", "NA")
 
     pairs = token2pps.get(str(token), [])
