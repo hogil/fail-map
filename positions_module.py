@@ -90,8 +90,6 @@ def save_positions_json(
         chips_json[idx]["y_cal"] = int(centerize_row(j, tiles_h_rot))
         chips_json[idx]["rect"] = {
             "x0": int(x0), "y0": int(y0), "x1": int(x1), "y1": int(y1),
-            "quad": [[int(x0), int(y0)], [int(x1), int(y0)],
-                     [int(x1), int(y1)], [int(x0), int(y1)]]
         }
 
     # ===== netd / gd / yield / sys =====
@@ -170,4 +168,4 @@ def save_positions_json(
     base_name = os.path.splitext(os.path.basename(output_path))[0]
     json_path = os.path.join(json_dir, base_name + ".json")
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(json_obj, f, ensure_ascii=False, indent=2)
+        json.dump(json_obj, f, ensure_ascii=False, separators=(',', ':'))
