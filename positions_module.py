@@ -38,6 +38,7 @@ def save_positions_json(
     canvas_w, canvas_h,
     sx, sy,
     border_thin, defect_border_thickness,
+    json_format="compact",
 ):
     """
     positions JSON 생성 및 저장.
@@ -163,37 +164,72 @@ def save_positions_json(
         "chips": chips_json
     }
 
-    # f, q, rect는 한 줄로 직렬화
-    _compact_keys = {"f", "q", "rect", "xs", "ys"}
+    # ===== compact_array: f/q 키 분리 + 값 배열화 =====
+    if json_format == "compact_array":
+        ftn_set, qtn_set = {}, {}
+        for c in chips_json:
+            if isinstance(c.get("f"), dict):
+                for k in c["f"]:
+                    ftn_set[k] = None
+            if isinstance(c.get("q"), dict):
+                for k in c["q"]:
+                    qtn_set[k] = None
+        ftn_keys = list(ftn_set.keys())
+        qtn_keys = list(qtn_set.keys())
+        if ftn_keys or qtn_keys:
+            for c in chips_json:
+                if isinstance(c.get("f"), dict):
+                    c["f"] = [c["f"].get(k, "") for k in ftn_keys]
+                if isinstance(c.get("q"), dict):
+                    c["q"] = [c["q"].get(k, "") for k in qtn_keys]
+            # ftn_keys/qtn_keys를 chips 앞에 삽입
+            ordered = {}
+            for k, v in json_obj.items():
+                if k == "chips":
+                    if ftn_keys:
+                        ordered["ftn_keys"] = ftn_keys
+                    if qtn_keys:
+                        ordered["qtn_keys"] = qtn_keys
+                ordered[k] = v
+            json_obj = ordered
 
-    class _CompactEncoder(json.JSONEncoder):
-        def encode(self, o):
-            return self._encode(o, level=0)
-
-        def _encode(self, o, level):
-            indent = "  " * level
-            if isinstance(o, dict):
-                if not o:
-                    return "{}"
-                items = []
-                for k, v in o.items():
-                    if k in _compact_keys and isinstance(v, (dict, list)):
-                        val_str = json.dumps(v, ensure_ascii=False, separators=(", ", ": "))
-                    else:
-                        val_str = self._encode(v, level + 1)
-                    items.append(f'{indent}  "{k}": {val_str}')
-                return "{\n" + ",\n".join(items) + "\n" + indent + "}"
-            elif isinstance(o, list):
-                if not o:
-                    return "[]"
-                items = [f"{indent}  {self._encode(item, level + 1)}" for item in o]
-                return "[\n" + ",\n".join(items) + "\n" + indent + "]"
-            else:
-                return json.dumps(o, ensure_ascii=False)
-
+    # ===== 직렬화 =====
     json_dir = os.path.join(positions_root, safe_prefix(p1), safe_prefix(p2), day)
     os.makedirs(json_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(output_path))[0]
     json_path = os.path.join(json_dir, base_name + ".json")
-    with open(json_path, "w", encoding="utf-8") as f:
-        f.write(_CompactEncoder().encode(json_obj))
+
+    if json_format in ("compact", "compact_array"):
+        _ck = {"f", "q", "rect", "xs", "ys"}
+        if json_format == "compact_array":
+            _ck |= {"ftn_keys", "qtn_keys"}
+
+        class _CompactEncoder(json.JSONEncoder):
+            def encode(self, o):
+                return self._encode(o, level=0)
+            def _encode(self, o, level):
+                indent = "  " * level
+                if isinstance(o, dict):
+                    if not o:
+                        return "{}"
+                    items = []
+                    for k, v in o.items():
+                        if k in _ck and isinstance(v, (dict, list)):
+                            val_str = json.dumps(v, ensure_ascii=False, separators=(", ", ": "))
+                        else:
+                            val_str = self._encode(v, level + 1)
+                        items.append(f'{indent}  "{k}": {val_str}')
+                    return "{\n" + ",\n".join(items) + "\n" + indent + "}"
+                elif isinstance(o, list):
+                    if not o:
+                        return "[]"
+                    items = [f"{indent}  {self._encode(i, level + 1)}" for i in o]
+                    return "[\n" + ",\n".join(items) + "\n" + indent + "]"
+                else:
+                    return json.dumps(o, ensure_ascii=False)
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            f.write(_CompactEncoder().encode(json_obj))
+    else:
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(json_obj, f, ensure_ascii=False, indent=2)
