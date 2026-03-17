@@ -385,9 +385,13 @@ class ImageGenerator:
 
             wafer_for_name = wafer[1:] if str(wafer).startswith("W") else wafer
             yld, sys_val = _calc_yield_and_sys(samples, kind)
+            _bm = samples[0].get("bucket_b_match") or {}
+            _bp = _bm.get("bucket_b_parsed") or {}
+            lt = safe_name(_bp.get("lt") or "NA")
+            tm = safe_name(_bp.get("tm") or "NA")
             out_path = os.path.join(
                 out_dir,
-                f"{safe_name(root)}_{safe_name(step)}_{safe_name(wafer_for_name)}_{safe_name(stime)}_{yld:.1f}_{sys_val:.1f}.png"
+                f"{safe_name(root)}_{safe_name(step)}_{safe_name(wafer_for_name)}_{safe_name(stime)}_{yld:.1f}_{sys_val:.1f}_{lt}_{tm}.png"
             )
 
             tasks.append((

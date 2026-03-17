@@ -6,12 +6,12 @@
 {base_root}/{p1}/{p2}/{day}/{filename}.png
 ```
 
-예: `/appdata/appuser/images/AB/P1AB/20260312/ABC123_S01_12_20260312_143000_87.5_3.2.png`
+예: `/appdata/appuser/images/AB/P1AB/20260312/ABC123_S01_12_20260312_143000_87.5_3.2_EE_Normal.png`
 
 ## 파일명 형식
 
 ```
-{root}_{step}_{wafer}_{stime}_{yield}_{sys}.png
+{root}_{step}_{wafer}_{stime}_{yield}_{sys}_{LT}_{TM}.png
 ```
 
 | 구성요소 | 예시 | 설명 | 출처 |
@@ -22,6 +22,8 @@
 | `stime` | `20260312_143000` | 검사 시간 | `:STIME=` → `YYYYMMDD_HHMMSS` |
 | `yield` | `87.5` | Good Die 비율 (소수점 1자리) | `gd / netd * 100` |
 | `sys` | `3.2` | Defect BIN 비율 (소수점 1자리) | `sys_count / netd * 100` |
+| `LT` | `EE` | Lot Type | Bucket B 5번째 줄 `LT=` (없으면 `NA`) |
+| `TM` | `Normal` | Test Mode | Bucket B 1번째 줄 `TM=` (없으면 `NA`) |
 
 ## yield 계산
 
