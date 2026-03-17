@@ -75,6 +75,8 @@ def save_positions_json(
             chip_key = f"{chip_entry['x_abs']}_{chip_entry['y_abs']}"
             cd = chip_data_b.get(chip_key)
             if cd:
+                if cd.get("b"):
+                    chip_entry["b"] = cd["b"]
                 if cd.get("FTN"):
                     chip_entry["f"] = cd["FTN"]
                 if cd.get("QTN"):
