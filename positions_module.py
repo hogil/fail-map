@@ -129,6 +129,10 @@ def save_positions_json(
         _b_key = str(_bm.get("key") or "")
         _tm = str((_b_parsed or {}).get("tm") or "")
         _lt = str((_b_parsed or {}).get("lt") or "")
+        # Bucket B yield로 덮어쓰기
+        if _b_parsed and _b_parsed.get("yield"):
+            yield_val = _b_parsed["yield"]
+            gd = _b_parsed.get("gd", gd)
 
     json_obj = {
         "bucket_b_key": _b_key,

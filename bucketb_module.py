@@ -171,6 +171,9 @@ def parse_bucket_b_content(text):
             x_val = str(int(m.group(1)))
             y_val = str(int(m.group(2)))
             chip_key = f"{x_val}_{y_val}"
+            # B= 값 추출 (같은 줄에 있을 수 있음)
+            b_m = re.search(r'B=\s*(\S+)', lines[i].strip())
+            b_val = b_m.group(1) if b_m else ""
             f_vals = []
             q_vals = []
             j = i + 1
@@ -182,10 +185,14 @@ def parse_bucket_b_content(text):
                     f_vals = nxt[2:].split()
                 elif nxt.startswith("Q="):
                     q_vals = nxt[2:].split()
+                elif nxt.startswith("B=") and not b_val:
+                    b_m2 = re.match(r'B=\s*(\S+)', nxt)
+                    if b_m2:
+                        b_val = b_m2.group(1)
                 j += 1
             ftn_map = {k: (f_vals[idx] if idx < len(f_vals) else "") for idx, k in enumerate(ftn_keys)}
             qtn_map = {k: (q_vals[idx] if idx < len(q_vals) else "") for idx, k in enumerate(qtn_keys)}
-            chip_data[chip_key] = {"FTN": ftn_map, "QTN": qtn_map}
+            chip_data[chip_key] = {"FTN": ftn_map, "QTN": qtn_map, "b": b_val}
         i += 1
 
     # 3) TM 추출 (1번째 줄), LT 추출 (5번째 줄)
@@ -200,6 +207,17 @@ def parse_bucket_b_content(text):
         if lt_m:
             lt = lt_m.group(1)
 
+    # 4) Bucket B yield 계산: B < 200 / 전체 칩 수
+    total_chips = len(chip_data)
+    gd_b = 0
+    for cd in chip_data.values():
+        try:
+            if int(cd.get("b") or 0) < 200:
+                gd_b += 1
+        except (ValueError, TypeError):
+            pass
+    yield_b = f"{gd_b / total_chips * 100:.2f}" if total_chips > 0 else "0.00"
+
     return {
         "first_line": first_line,
         "tm": tm,
@@ -207,6 +225,9 @@ def parse_bucket_b_content(text):
         "ftn_keys": ftn_keys,
         "qtn_keys": qtn_keys,
         "chip_data": chip_data,
+        "yield": yield_b,
+        "gd": gd_b,
+        "total_chips": total_chips,
     }
 
 

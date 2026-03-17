@@ -390,6 +390,12 @@ class ImageGenerator:
             yld, sys_val = _calc_yield_and_sys(samples, kind)
             _bm = samples[0].get("bucket_b_match") or {}
             _bp = _bm.get("bucket_b_parsed") or {}
+            # Bucket B yield로 덮어쓰기
+            if _bp.get("yield"):
+                try:
+                    yld = float(_bp["yield"])
+                except (ValueError, TypeError):
+                    pass
             lt = safe_name(_bp.get("lt") or "NA")
             tm = safe_name(_bp.get("tm") or "NA")
             out_path = os.path.join(
