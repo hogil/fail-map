@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Fail-bit map PNG + positions JSON generator (00P/00C dual pipeline)
+Fail-bit map PNG + positions JSON generator — compact + array JSON 버전
+- f/q 키 상단 분리 + 값 배열화 (~65% 용량 감소)
+- f/q/rect/xs/ys/ftn_keys/qtn_keys 한 줄 직렬화
 
 핵심 동작(요구사항 반영):
 1) 파일명 1차 필터: -00P_ 와 -00C_ 둘 다 잡음 (kind=00P/00C 구분)
@@ -281,6 +283,7 @@ def create_sample_image_func(args):
         Ws, Hs,
         sx, sy,
         border_thin, defect_border_thickness,
+        json_format="compact_array",
     )
 
     return output_path
