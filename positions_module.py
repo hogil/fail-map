@@ -163,9 +163,37 @@ def save_positions_json(
         "chips": chips_json
     }
 
+    # f, q, rect는 한 줄로 직렬화
+    _compact_keys = {"f", "q", "rect"}
+
+    class _CompactEncoder(json.JSONEncoder):
+        def encode(self, o):
+            return self._encode(o, level=0)
+
+        def _encode(self, o, level):
+            indent = "  " * level
+            if isinstance(o, dict):
+                if not o:
+                    return "{}"
+                items = []
+                for k, v in o.items():
+                    if k in _compact_keys and isinstance(v, dict):
+                        val_str = json.dumps(v, ensure_ascii=False, separators=(", ", ": "))
+                    else:
+                        val_str = self._encode(v, level + 1)
+                    items.append(f'{indent}  "{k}": {val_str}')
+                return "{\n" + ",\n".join(items) + "\n" + indent + "}"
+            elif isinstance(o, list):
+                if not o:
+                    return "[]"
+                items = [f"{indent}  {self._encode(item, level + 1)}" for item in o]
+                return "[\n" + ",\n".join(items) + "\n" + indent + "]"
+            else:
+                return json.dumps(o, ensure_ascii=False)
+
     json_dir = os.path.join(positions_root, safe_prefix(p1), safe_prefix(p2), day)
     os.makedirs(json_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(output_path))[0]
     json_path = os.path.join(json_dir, base_name + ".json")
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(json_obj, f, ensure_ascii=False, separators=(',', ':'))
+        f.write(_CompactEncoder().encode(json_obj))
