@@ -164,7 +164,7 @@ def save_positions_json(
     }
 
     # f, q, rect는 한 줄로 직렬화
-    _compact_keys = {"f", "q", "rect"}
+    _compact_keys = {"f", "q", "rect", "xs", "ys"}
 
     class _CompactEncoder(json.JSONEncoder):
         def encode(self, o):
@@ -177,7 +177,7 @@ def save_positions_json(
                     return "{}"
                 items = []
                 for k, v in o.items():
-                    if k in _compact_keys and isinstance(v, dict):
+                    if k in _compact_keys and isinstance(v, (dict, list)):
                         val_str = json.dumps(v, ensure_ascii=False, separators=(", ", ": "))
                     else:
                         val_str = self._encode(v, level + 1)
