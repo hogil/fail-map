@@ -114,8 +114,8 @@ def rename_image_if_needed(png_path, positions_root):
 
 def main():
     parser = argparse.ArgumentParser(description="Backfill LT/TM into positions JSON and image filenames")
-    parser.add_argument("--images-root", required=True, help="이미지 루트 디렉토리")
-    parser.add_argument("--positions-root", required=True, help="positions JSON 루트 디렉토리")
+    parser.add_argument("--images-root", default="/appdata/appuser/images", help="이미지 루트 디렉토리")
+    parser.add_argument("--positions-root", default="/appdata/appuser/positions", help="positions JSON 루트 디렉토리")
     parser.add_argument("--workers", type=int, default=8, help="병렬 워커 수 (기본 8)")
     args = parser.parse_args()
 
