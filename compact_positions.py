@@ -129,7 +129,7 @@ def main():
     )
     parser.add_argument(
         "--positions-root",
-        default="/appdata/appuser/positions",
+        default=r"D:\project\data\positions",
         help="positions JSON 루트 디렉토리",
     )
     parser.add_argument("--workers", type=int, default=8, help="병렬 워커 수")
