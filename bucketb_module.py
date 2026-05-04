@@ -207,21 +207,19 @@ def parse_bucket_b_content(text):
         if lt_m:
             lt = lt_m.group(1)
 
-    # 4) Bucket B yield 계산: B < 200 / B값 있는 칩 수 (B= 없으면 yield 생략)
+    # 4) Bucket B yield 계산: B < 200 / 전체 칩 수 (B 없으면 불량 처리)
     total_chips = len(chip_data)
     gd_b = 0
-    b_count = 0
     for cd in chip_data.values():
         b_str = (cd.get("b") or "").strip()
         if not b_str:
             continue
-        b_count += 1
         try:
             if int(b_str) < 200:
                 gd_b += 1
         except (ValueError, TypeError):
             pass
-    yield_b = f"{gd_b / b_count * 100:.2f}" if b_count > 0 else ""
+    yield_b = f"{gd_b / total_chips * 100:.2f}" if total_chips > 0 else "0.00"
 
     return {
         "first_line": first_line,
