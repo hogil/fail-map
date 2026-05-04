@@ -26,16 +26,16 @@ from tqdm import tqdm
 def create_s3_client(cfg):
     """PipelineConfig / BucketBConfig 둘 다 사용 가능."""
     return boto3.session.Session().client(
-        "s3",
-        region_name=cfg.region_name or None,
-        aws_access_key_id=cfg.aws_access_key_id or None,
-        aws_secret_access_key=cfg.aws_secret_access_key or None,
-        endpoint_url=cfg.endpoint_url or None,
+        region_name=cfg.region_name,
+        service_name='s3',
+        aws_access_key_id=cfg.aws_access_key_id,
+        aws_secret_access_key=cfg.aws_secret_access_key,
+        endpoint_url=cfg.endpoint_url,
         config=Config(
             max_pool_connections=cfg.max_pool_connections,
             retries={'max_attempts': 8, 'mode': 'adaptive'},
         ),
-        use_ssl=False,
+        verify='/etc/ssl/certs/certificate.crt',
     )
 
 

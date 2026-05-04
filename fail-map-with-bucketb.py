@@ -48,10 +48,10 @@ from positions_module import save_positions_json, map_tile_after_rotation
 @dataclass
 class PipelineConfig:
     bucket_name: str = 'eds-ec-memory.fbm-data'
-    region_name: str = ''
-    aws_access_key_id: str = 'ho.choi-LakeS3-F6B0U6'            # 요청: 자동 치환 금지
-    aws_secret_access_key: str = 'iYb7zYDVzitt4QVkUcR2'         # 요청: 자동 치환 금지
-    endpoint_url: str = 'http://lakes3.dataplatform.samsungds.net:9020'
+    region_name: str = 'data-platform'
+    aws_access_key_id: str = 'ho.choi-LAKES3-VS47IW'            # 요청: 자동 치환 금지
+    aws_secret_access_key: str = 'WhpcpD6ealBZQjB1SKGu'         # 요청: 자동 치환 금지
+    endpoint_url: str = 'https://datalakes3.dataplatform.samsungds.net:9021'
 
     max_pool_connections: int = 256
     download_threads: int = 128

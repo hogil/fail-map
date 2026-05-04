@@ -26,10 +26,10 @@ class BucketBConfig:
     시간 오프셋: -10~+10초
     """
     bucket_name: str = 'eds.m-eds-map-raw'
-    region_name: str = ''
-    aws_access_key_id: str = 'ho.choi-LakeS3-F6B0U6'            # 요청: 자동 치환 금지
-    aws_secret_access_key: str = 'iYb7zYDVzitt4QVkUcR2'         # 요청: 자동 치환 금지
-    endpoint_url: str = 'http://lakes3.dataplatform.samsungds.net:9020'
+    region_name: str = 'data-platform'
+    aws_access_key_id: str = 'ho.choi-LAKES3-VS47IW'            # 요청: 자동 치환 금지
+    aws_secret_access_key: str = 'WhpcpD6ealBZQjB1SKGu'         # 요청: 자동 치환 금지
+    endpoint_url: str = 'https://datalakes3.dataplatform.samsungds.net:9021'
     max_pool_connections: int = 256
     enabled: bool = True
     time_offset_range: tuple = (-10, 10)
