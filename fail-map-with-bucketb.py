@@ -45,6 +45,18 @@ from positions_module import save_positions_json, map_tile_after_rotation
 
 # =================== Config ===================
 
+WINDOWS_DATA_ROOT = r"E:\data"
+LINUX_APP_ROOT = "/appdata/appuser"
+
+
+def default_images_root():
+    return os.path.join(WINDOWS_DATA_ROOT, "images") if os.name == "nt" else os.path.join(LINUX_APP_ROOT, "images")
+
+
+def default_positions_root():
+    return os.path.join(WINDOWS_DATA_ROOT, "positions") if os.name == "nt" else os.path.join(LINUX_APP_ROOT, "positions")
+
+
 @dataclass
 class PipelineConfig:
     bucket_name: str = 'eds-ec-memory.fbm-data'
@@ -77,8 +89,8 @@ class PipelineConfig:
     df_path: str = "/appdata/appuser/project/device_info.txt"
     df_positions: tuple = (4, 3, 1)  # (token, prefix1, prefix2) 1-based
 
-    base_root: str = "/appdata/appuser/images"
-    positions_root: str = "/appdata/appuser/positions"
+    base_root: str = default_images_root()
+    positions_root: str = default_positions_root()
 
 CFG = PipelineConfig()
 CFG.folder_filter_middles = {"00P": "-00P_", "00C": "-00C_"}

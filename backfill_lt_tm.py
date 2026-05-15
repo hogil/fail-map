@@ -16,6 +16,17 @@ from pathlib import Path
 LT_VALUES = ["EE", "PE", "PT"]
 TM_VALUES = ["Normal", "Engineer", "Test"]
 
+WINDOWS_DATA_ROOT = r"E:\data"
+LINUX_APP_ROOT = "/appdata/appuser"
+
+
+def default_images_root():
+    return os.path.join(WINDOWS_DATA_ROOT, "images") if os.name == "nt" else os.path.join(LINUX_APP_ROOT, "images")
+
+
+def default_positions_root():
+    return os.path.join(WINDOWS_DATA_ROOT, "positions") if os.name == "nt" else os.path.join(LINUX_APP_ROOT, "positions")
+
 
 def backfill_position_json(json_path):
     """positions JSON에 lt/tm이 비어있으면 랜덤 값 추가. 변경 시 True 반환."""
@@ -114,8 +125,8 @@ def rename_image_if_needed(png_path, positions_root):
 
 def main():
     parser = argparse.ArgumentParser(description="Backfill LT/TM into positions JSON and image filenames")
-    parser.add_argument("--images-root", default="/appdata/appuser/images", help="이미지 루트 디렉토리")
-    parser.add_argument("--positions-root", default="/appdata/appuser/positions", help="positions JSON 루트 디렉토리")
+    parser.add_argument("--images-root", default=default_images_root(), help="이미지 루트 디렉토리")
+    parser.add_argument("--positions-root", default=default_positions_root(), help="positions JSON 루트 디렉토리")
     parser.add_argument("--workers", type=int, default=8, help="병렬 워커 수 (기본 8)")
     args = parser.parse_args()
 
