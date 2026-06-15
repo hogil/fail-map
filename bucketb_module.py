@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
+from botocore.exceptions import BotoCoreError, ClientError
+
 from utils import create_s3_client, decode_best_effort, split_key_and_inner
 
 
@@ -34,7 +36,9 @@ class BucketBConfig:
     enabled: bool = True
     time_offset_range: tuple = (-10, 10)
     file_ext: str = ".gz"
-    list_max_workers: int = 32
+    list_max_workers: int = 16
+    list_retry_attempts: int = 3
+    list_retry_base_sleep: float = 0.5
     firstline_max_workers: int = 32
     firstline_max_bytes: int = 65536
     debug: bool = False
@@ -244,11 +248,35 @@ class S3ManagerB:
     def list_keys_with_prefix(self, prefix: str):
         out = []
         token = None
+        retry_attempts = max(1, int(getattr(self.cfg, "list_retry_attempts", 3)))
+        retry_base_sleep = max(0.0, float(getattr(self.cfg, "list_retry_base_sleep", 0.5)))
         while True:
             kw = dict(Bucket=self.cfg.bucket_name, Prefix=prefix, Delimiter='/', MaxKeys=1000)
             if token:
                 kw["ContinuationToken"] = token
-            resp = self.client.list_objects_v2(**kw)
+            resp = None
+            for attempt in range(1, retry_attempts + 1):
+                try:
+                    resp = self.client.list_objects_v2(**kw)
+                    break
+                except ClientError as e:
+                    code = (e.response.get("Error") or {}).get("Code", "ClientError")
+                    if attempt >= retry_attempts:
+                        print(f"[bucketB] list skip prefix={prefix!r} code={code} attempts={retry_attempts}: {e}")
+                        return out
+                    time.sleep(retry_base_sleep * (2 ** (attempt - 1)))
+                except BotoCoreError as e:
+                    if attempt >= retry_attempts:
+                        print(f"[bucketB] list skip prefix={prefix!r} attempts={retry_attempts}: {e}")
+                        return out
+                    time.sleep(retry_base_sleep * (2 ** (attempt - 1)))
+                except Exception as e:
+                    if attempt >= retry_attempts:
+                        print(f"[bucketB] list skip prefix={prefix!r} attempts={retry_attempts}: {e}")
+                        return out
+                    time.sleep(retry_base_sleep * (2 ** (attempt - 1)))
+            if resp is None:
+                return out
             for obj in resp.get("Contents", []) or []:
                 out.append(obj["Key"])
             if resp.get("IsTruncated"):

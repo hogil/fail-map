@@ -514,7 +514,11 @@ def run_pipeline_for_dataframe(df: pd.DataFrame):
             # Bucket B 매칭(먼저): A key -> bucket_b_match meta
             bucket_b_match_map = {}
             if s3b:
-                bucket_b_match_map = build_bucket_b_match_map_prefixlist(part_keys, s3b, CFG_B, chunk_label=f"{idx}/{total_chunks}", miss_dir=CFG.positions_root)
+                try:
+                    bucket_b_match_map = build_bucket_b_match_map_prefixlist(part_keys, s3b, CFG_B, chunk_label=f"{idx}/{total_chunks}", miss_dir=CFG.positions_root)
+                except Exception as e:
+                    print(f"[bucketB] chunk {idx}/{total_chunks} match skipped: {e}")
+                    bucket_b_match_map = {}
 
             contents = s3.download_and_decompress_parallel(part_keys)
             if not contents:
